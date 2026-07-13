@@ -1,0 +1,29 @@
+# macOS / editors
+.DS_Store
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Generated original-game assets and local comparison output
+assets/*
+!assets/README.md
+artifacts/
+
+# Experimental local browser baseline harness
+tools/visual_baseline/
+
+# Local logs and temporary files
+*.log
+*.tmp
+*.swp

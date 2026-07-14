@@ -62,6 +62,20 @@ class OSDParityTests(unittest.TestCase):
             [[255, 0, 0], [51, 102, 255], [102, 204, 0], [255, 204, 0]],
         )
 
+    def test_embedded_futura_is_not_synthetically_emboldened_twice(self) -> None:
+        app = RuntimeApp.__new__(RuntimeApp)
+        app._ui_font_cache = {}
+        font = app._ui_font("Futura Md BT", 20, True)
+        self.assertFalse(font.get_bold())
+
+    def test_off_camera_ring_is_the_original_conditional_pos_indicator(self) -> None:
+        effect = self.manifest["effects"]["PosIndicator"]
+        self.assertEqual(effect["symbol_id"], 787)
+        self.assertEqual(len(effect["frames"]), 4)
+        self.assertTrue(
+            all(frame["offset"] == {"x": -44.0, "y": -31.05} for frame in effect["frames"])
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

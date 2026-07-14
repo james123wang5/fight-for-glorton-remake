@@ -105,6 +105,28 @@ class MultiplayerAIParityTests(unittest.TestCase):
         self.assertEqual(fighter._timeline_frame("spawn"), 5)
         self.assertGreater(fighter.current_image().get_bounding_rect().w, 1)
 
+    def test_fight_frame_item_timer_already_runs_during_countdown(self) -> None:
+        runtime = RuntimeApp()
+        runtime.item_gen_timer_ms = 1975
+        with (
+            patch("src.runtime.random.randrange", return_value=0),
+            patch.object(runtime.stage, "item_spawn_point", return_value=pygame.Vector2(300, 100)),
+        ):
+            runtime._fixed_tick_countdown([{}, {}])
+        self.assertEqual([item.kind for item in runtime.items], ["Mine"])
+
+    def test_go_to_combat_settles_source_half_pixel_spawn_without_falling_frame(self) -> None:
+        runtime = self.runtime
+        runtime._reset_match()
+        self.assertTrue(all(not fighter.on_ground for fighter in runtime.fighters))
+        runtime.ready_set = -1
+        runtime._apply_ready_step()
+        self.assertEqual(runtime.match_state, "playing")
+        for fighter in runtime.fighters:
+            self.assertTrue(fighter.on_ground)
+            self.assertEqual(fighter.current_label, "still")
+            self.assertEqual(fighter.pos.y, fighter.ground_platform.rect.top)
+
     def test_pregame_keycombi_updates_commands_but_gameon_freezes_physics(self) -> None:
         runtime = self.runtime
         runtime.match_config = {

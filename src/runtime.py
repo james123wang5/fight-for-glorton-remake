@@ -13,11 +13,15 @@ import pygame
 try:
     from .assets import LazySurfaceMap, LazySurfaceSequence, SURFACE_CACHE
     from .audio import AudioManager
+    from .display import DisplayMetrics, aligned_aspect_rect, detect_display_metrics
     from .menu import MainMenu, MatchResults, MenuAction
+    from .simulation import BattleSimulation
 except ImportError:
     from assets import LazySurfaceMap, LazySurfaceSequence, SURFACE_CACHE
     from audio import AudioManager
+    from display import DisplayMetrics, aligned_aspect_rect, detect_display_metrics
     from menu import MainMenu, MatchResults, MenuAction
+    from simulation import BattleSimulation
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -343,7 +347,11 @@ class StageItem:
         if not self.frames:
             return None
         labels = self.frame_labels or {}
-        label = "active" if self.state == 0 else "airbone" if self.state == 2 else "spawn"
+        # Item clips execute their frame-1 `gotoAndStop("airbone")` action
+        # after the class `init()` call has briefly selected `spawn`. The
+        # settled, unclaimed object therefore uses the airbone artwork too:
+        # the grenade keeps its green grid label and the mine is spiked.
+        label = "active" if self.state == 0 else "airbone"
         frame_no = labels.get(label)
         if frame_no is not None and 1 <= frame_no <= len(self.frames):
             frame = self.frames[frame_no - 1]
@@ -2299,9 +2307,25 @@ class PeachFighter:
             if self.current_attack:
                 self._advance_animation(old_label)
 
-    def finish_intro_spawn(self) -> None:
+    def finish_intro_spawn(self, stage: Stage | None = None) -> None:
         self.has_control = True
         self.spawn_fighter_visible = True
+        # The AVM1 CollisionDetect overlap test lands a fighter that starts a
+        # fraction of a pixel above the platform during the very first GameOn
+        # tick. Our swept crossing otherwise emits one intermediate `falling`
+        # frame, which looks like a shake between GO! and combat.
+        if stage is not None and not self.on_ground and self.yinc >= 0:
+            nearby = [
+                platform
+                for platform in stage.platforms
+                if 0 <= platform.rect.top - self.pos.y <= 1.0
+                and platform.rect.left - self.foot_radius
+                <= self.pos.x
+                <= platform.rect.right + self.foot_radius
+            ]
+            if nearby:
+                self._land_on_platform(min(nearby, key=lambda item: item.rect.top))
+                self.prev_pos.update(self.pos)
         if self.current_attack:
             self.current_label = self.current_attack
         else:
@@ -2572,7 +2596,7 @@ class AIController:
 
 
 class RuntimeApp:
-    def __init__(self) -> None:
+    def __init__(self, random_seed: int = 0) -> None:
         self.manifest = load_manifest()
         self.stage = Stage(self.manifest)
         self.bullets: list[Bullet] = []
@@ -2644,6 +2668,8 @@ class RuntimeApp:
         self._stage_scene_cache_key: tuple[object, ...] | None = None
         self._stage_scene_cache: pygame.Surface | None = None
         self._sky_surface_cache: dict[tuple[int, int], pygame.Surface] = {}
+        self.display_metrics: DisplayMetrics | None = None
+        self._high_output_active = False
         self.death_effects: list[DeathEffect] = []
         self.camera_tricks: list[DeathEffect] = []
         self.camera_shake_start_ms = 0
@@ -2680,7 +2706,8 @@ class RuntimeApp:
         self.countdown_focus_indices: list[int] = []
         self.fighters: list[PeachFighter] = []
         self.player: PeachFighter
-        self._reset_match()
+        self.simulation = BattleSimulation(self, seed=random_seed, tick_ms=TICK_MS)
+        self.simulation.reset()
 
     def _create_inputs(self) -> list[FighterInput]:
         menu = getattr(self, "menu", None)
@@ -2820,6 +2847,7 @@ class RuntimeApp:
         pygame.init()
         self.audio = AudioManager(ROOT)
         screen = pygame.display.set_mode(WINDOW_SIZE, pygame.RESIZABLE)
+        self.display_metrics = detect_display_metrics(screen)
         pygame.display.set_caption("The Fight for Glorton")
         self.menu = MainMenu(ROOT, self.manifest)
         self.results = MatchResults(ROOT, self.manifest)
@@ -2873,7 +2901,7 @@ class RuntimeApp:
                     elif event.key == pygame.K_F1:
                         self.show_debug = not self.show_debug
                     elif event.key == pygame.K_r:
-                        self._reset_match()
+                        self.simulation.reset()
                     elif self.match_state not in {"loading", "countdown", "playing"}:
                         continue
                     else:
@@ -2900,10 +2928,7 @@ class RuntimeApp:
                     self.stage.set_time(self.stage_time_ms)
                     if self.match_state in {"loading", "countdown", "playing"}:
                         controls = [player_input.controls(keys) for player_input in self.inputs]
-                        if self.match_state in {"loading", "countdown"}:
-                            self._fixed_tick_countdown(controls)
-                        else:
-                            self._fixed_tick_match(controls)
+                        self.simulation.step(controls, advance_clock=False)
                     self.accumulator -= TICK_MS
                 if self.match_state == "game_set" and not self.game_set_audio_played:
                     self._play_game_set_audio()
@@ -2923,7 +2948,7 @@ class RuntimeApp:
                 if self.app_state == "results":
                     self.results.draw(screen)
                 else:
-                    self._draw(screen, font)
+                    self._draw_output(screen, font)
                     if self.paused:
                         self._draw_pause_overlay(screen)
             pygame.display.flip()
@@ -2961,7 +2986,7 @@ class RuntimeApp:
         self.paused = False
         self.match_end_elapsed_ms = 0
         self.accumulator = 0
-        self._reset_match()
+        self.simulation.reset()
         if self.audio is not None:
             self.audio.stop_all()
             self.menu_music_started = False
@@ -3099,20 +3124,8 @@ class RuntimeApp:
         self._stage_scene_cache = None
 
     def _fixed_tick_countdown(self, player_controls: list[dict[str, bool]] | None = None) -> None:
-        controls_by_player = player_controls or [{} for _ in self.fighters]
-        source_computers = list(self.ai_controllers.values())
-        for index, fighter in enumerate(self.fighters):
-            controls = (
-                controls_by_player[index]
-                if index < len(controls_by_player) and index not in self.ai_controllers
-                else {}
-            )
-            fighter.advance_pre_game_tick(controls)
-            fighter.advance_intro_tick()
-            if index < len(source_computers):
-                source_computers[index].fixed_tick(self.fighters)
-        if self.match_state == "countdown":
-            self._step_camera()
+        controls = BattleSimulation.normalize_inputs(player_controls, len(self.fighters))
+        self.simulation._fixed_tick_countdown(controls)
 
     def _start_match_countdown(self) -> None:
         self.match_state = "countdown"
@@ -3197,7 +3210,7 @@ class RuntimeApp:
             for fighter in self.fighters:
                 fighter.intro_visible = True
                 if not fighter.dead:
-                    fighter.finish_intro_spawn()
+                    fighter.finish_intro_spawn(getattr(self, "stage", None))
 
     def _show_intro_player(self, index: int) -> None:
         if index < 0 or index >= len(self.fighters):
@@ -3214,55 +3227,8 @@ class RuntimeApp:
         return
 
     def _fixed_tick_match(self, player_controls: list[dict[str, bool]]) -> None:
-        self._fixed_tick_items()
-        # DoMain indexes the dense Computers[] array with the fighter-loop
-        # index. With P1 human, Computers[0] (P2) therefore acts after P1 and
-        # before P2 is simulated, rather than after its own fighter tick.
-        source_computers = list(self.ai_controllers.values())
-        for index, fighter in enumerate(self.fighters):
-            controls = (
-                player_controls[index]
-                if index < len(player_controls) and index not in self.ai_controllers
-                else {}
-            )
-            fighter.fixed_tick(
-                self.stage,
-                controls,
-                self.bullets,
-                self.rockets,
-                self.special_projectiles,
-            )
-            if fighter.pending_stage_boom:
-                self._start_explosion(fighter.pos, None, 4)
-                fighter.pending_stage_boom = False
-            self._collect_fighter_sounds(fighter)
-            self._collect_puffs(fighter)
-            self._collect_death_event(fighter)
-            if fighter.resolve_attack_this_tick:
-                self._resolve_melee_hits(fighter)
-            fighter.finish_post_collision_tick()
-            if index < len(source_computers):
-                source_computers[index].fixed_tick(self.fighters)
-        for bullet in self.bullets:
-            bullet.fixed_tick(self.stage)
-        for rocket in self.rockets:
-            rocket.fixed_tick(self.stage)
-        for projectile in self.special_projectiles:
-            projectile.fixed_tick(self.stage)
-        self._resolve_bullet_hits()
-        self._resolve_rocket_hits()
-        self._resolve_special_projectile_hits()
-        self.bullets = [bullet for bullet in self.bullets if bullet.alive]
-        self.rockets = [rocket for rocket in self.rockets if rocket.alive]
-        self.special_projectiles = [projectile for projectile in self.special_projectiles if projectile.alive]
-        self._resolve_item_collisions()
-        self._tick_explosions()
-        for fighter in self.fighters:
-            self._collect_fighter_sound_stops(fighter)
-        self._tick_death_effects()
-        self._tick_spawn_effects()
-        self._update_match_state()
-        self._step_camera()
+        controls = BattleSimulation.normalize_inputs(player_controls, len(self.fighters))
+        self.simulation._fixed_tick_match(controls)
 
     def _fixed_tick_items(self) -> None:
         self.item_gen_timer_ms += TICK_MS
@@ -3882,7 +3848,15 @@ class RuntimeApp:
         quality = getattr(getattr(self, "menu", None), "quality", "MEDIUM")
         if quality == "LOW":
             return pygame.transform.scale(surface, size)
-        return pygame.transform.smoothscale(surface, size)
+        if quality != "HIGH" or self._high_output_active:
+            return pygame.transform.smoothscale(surface, size)
+        ratio = max(2, round(getattr(self.display_metrics, "pixel_ratio", 1.0)))
+        intermediate_size = (
+            max(1, int(size[0]) * ratio),
+            max(1, int(size[1]) * ratio),
+        )
+        intermediate = pygame.transform.smoothscale(surface, intermediate_size)
+        return pygame.transform.smoothscale(intermediate, size)
 
     def _draw_sky_backdrop(self, screen: pygame.Surface, viewport: pygame.Rect) -> None:
         if viewport.w <= 0 or viewport.h <= 0:
@@ -4218,10 +4192,27 @@ class RuntimeApp:
         self._stage_scene_cache = scene
         return scene
 
+    def _draw_output(self, screen: pygame.Surface, font: pygame.font.Font) -> None:
+        quality = getattr(getattr(self, "menu", None), "quality", "MEDIUM")
+        if quality != "HIGH":
+            self._draw(screen, font)
+            return
+        ratio = max(2, round(getattr(self.display_metrics, "pixel_ratio", 1.0)))
+        render_size = (screen.get_width() * ratio, screen.get_height() * ratio)
+        high_surface = pygame.Surface(render_size).convert()
+        high_font = pygame.font.SysFont("menlo", max(1, 14 * ratio))
+        self._high_output_active = True
+        try:
+            self._draw(high_surface, high_font)
+        finally:
+            self._high_output_active = False
+        screen.blit(pygame.transform.smoothscale(high_surface, screen.get_size()), (0, 0))
+
     def _draw(self, screen: pygame.Surface, font: pygame.font.Font) -> None:
         w, h = screen.get_size()
         panel_x = max(0, w - PANEL_WIDTH) if self.show_debug else w
-        viewport = MainMenu._screen_rect((panel_x, h))
+        pixel_ratio = 1.0 if self._high_output_active else getattr(self.display_metrics, "pixel_ratio", 1.0)
+        viewport = aligned_aspect_rect((panel_x, h), pixel_ratio=pixel_ratio)
         alpha = self._render_alpha()
         cam, zoom = self._camera(viewport, alpha)
 
@@ -4336,6 +4327,12 @@ class RuntimeApp:
 
         pygame.draw.rect(screen, (32, 35, 42), (panel_x, 0, PANEL_WIDTH, h))
         winner = self.match_winner.name if self.match_winner is not None else "-"
+        metrics = self.display_metrics
+        display_line = (
+            f"Display: {metrics.pixel_ratio:.2f}x {metrics.source}"
+            if metrics is not None
+            else "Display: undetected"
+        )
         lines = [
             "Playable Runtime",
             "P1 A/D move  W jump",
@@ -4349,6 +4346,9 @@ class RuntimeApp:
             f"Match: {self.match_state}",
             f"Winner: {winner}",
             f"Tick: {TICK_MS} ms",
+            f"Sim tick: {self.simulation.tick_index}",
+            display_line,
+            f"Quality: {getattr(getattr(self, 'menu', None), 'quality', 'MEDIUM')}",
             f"State: {self.player.state}",
             f"Frame: {self.player.current_label}",
             f"Anim: {self.player.animation_frame}",
@@ -4985,12 +4985,19 @@ class RuntimeApp:
         if cached is not None:
             return cached
         if name.lower() in {"futura md bt", "futura lt bt"}:
-            embedded_path = ROOT / "assets/fonts/2_Futura Md BT.ttf"
+            native_futura = Path("/System/Library/Fonts/Supplemental/Futura.ttc")
+            embedded_path = (
+                native_futura
+                if native_futura.is_file()
+                else ROOT / "assets/fonts/2_Futura Md BT.ttf"
+            )
         else:
             embedded_path = None
         if embedded_path is not None and embedded_path.is_file():
             cached = pygame.font.Font(str(embedded_path), key[1])
-            cached.set_bold(key[2])
+            # Font 2 is already the embedded bold Futura outline. Calling
+            # set_bold(True) fabricates a second outline and makes FarIndicator
+            # P1/P2 visibly heavier than the source SWF.
         else:
             path = pygame.font.match_font(name, bold=bold)
             cached = pygame.font.Font(path, key[1]) if path else pygame.font.SysFont(name, key[1], bold=bold)

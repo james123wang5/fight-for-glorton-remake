@@ -84,6 +84,20 @@ class PeachBattleParityTests(unittest.TestCase):
         self.assertEqual(item.age_ms, 20000 + TICK_MS)
         self.assertEqual(item.pos.x, 301)
 
+    def test_unclaimed_items_use_source_airbone_artwork(self) -> None:
+        runtime = RuntimeApp()
+        for kind in ("Grenade", "Mine"):
+            frames = runtime.item_frames[kind]
+            labels = runtime.item_frame_labels[kind]
+            item = StageItem(
+                kind,
+                pygame.Vector2(),
+                frames,
+                frame_labels=labels,
+            )
+            self.assertIs(item.display_frame(), frames[labels["airbone"] - 1])
+            self.assertIsNot(item.display_frame(), frames[labels["spawn"] - 1])
+
     def test_run_and_second_jump_use_complete_source_timelines(self) -> None:
         fighter = self.fighter()
         self.assertEqual(fighter.animations["run"]["frame_count"], 18)

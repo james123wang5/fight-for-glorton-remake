@@ -270,6 +270,11 @@ class MenuParityTests(unittest.TestCase):
         self.menu.player_levels[0] = 20
         self.menu.player_levels[0] = min(20, self.menu.player_levels[0] + 1)
         self.assertEqual(self.menu.player_levels[0], 20)
+        self.assertEqual(self.menu._maximum_ai_level(), 20)
+        with patch.dict(os.environ, {"GLORTON_AI21_MODEL": "/tmp/model.zip"}):
+            self.assertEqual(self.menu._maximum_ai_level(), 21)
+        with patch.dict(os.environ, {"GLORTON_AI22_MODEL": "/tmp/model.zip"}):
+            self.assertEqual(self.menu._maximum_ai_level(), 22)
 
     def test_duplicate_fighters_receive_next_unused_source_color(self) -> None:
         self.menu._start_player_select("vsmode", 4, 4)

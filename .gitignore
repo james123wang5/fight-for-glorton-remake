@@ -13,12 +13,25 @@ __pycache__/
 .coverage
 htmlcov/
 .venv/
+.venv-train/
+.venv-web/
 venv/
+
+# Generated WebAssembly/PWA staging and output
+build/mobile/
+
+# Private Sites checkout (contains locally generated original-game binaries)
+mobile/site-host/
 
 # Generated original-game assets and local comparison output
 assets/*
 !assets/README.md
 artifacts/
+
+# Local reinforcement-learning output (models can grow very large)
+training/checkpoints/
+training/logs/
+training/replays/
 
 # Experimental local browser baseline harness
 tools/visual_baseline/

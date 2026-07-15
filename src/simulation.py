@@ -244,8 +244,44 @@ class BattleSimulation:
     ) -> dict[str, Any]:
         """Advance exactly one 25 ms combat tick and return a state snapshot."""
 
+        self._advance_once(inputs, advance_clock=advance_clock)
+        return self.snapshot()
+
+    def step_fast(
+        self,
+        inputs: Sequence[Mapping[str, Any]] | None = None,
+        *,
+        advance_clock: bool = True,
+    ) -> None:
+        """Advance one combat tick without building the large debug snapshot.
+
+        Training loops call this method thousands of times per second and read
+        their compact observations directly from the runtime.  ``step`` keeps
+        its existing snapshot-returning contract for tests, recordings and
+        server integrations.
+        """
+
+        self._advance_once(inputs, advance_clock=advance_clock)
+
+    def _advance_once(
+        self,
+        inputs: Sequence[Mapping[str, Any]] | None,
+        *,
+        advance_clock: bool,
+    ) -> None:
+        """Shared deterministic tick implementation for both public steps."""
+
         runtime = self.runtime
         controls = self.normalize_inputs(inputs, len(runtime.fighters))
+        for index, controller in runtime.ai_controllers.items():
+            control_source = getattr(controller, "controls_for_tick", None)
+            if index >= len(controls) or not callable(control_source):
+                continue
+            generated = control_source(runtime.fighters)
+            controls[index] = {
+                field: bool(generated.get(field, False))
+                for field in INPUT_FIELDS
+            }
         with self._activate_rng():
             self._apply_control_edges(controls)
             if advance_clock:
@@ -260,13 +296,15 @@ class BattleSimulation:
             self._recording_inputs.append(copy.deepcopy(controls))
         self._previous_controls = copy.deepcopy(controls)
         self.tick_index += 1
-        return self.snapshot()
 
     def _apply_control_edges(self, controls: list[dict[str, bool]]) -> None:
         runtime = self.runtime
         previous = self._previous_controls
         for index, fighter in enumerate(runtime.fighters):
-            if index in runtime.ai_controllers:
+            controller = runtime.ai_controllers.get(index)
+            if controller is not None and not bool(
+                getattr(controller, "uses_simulation_controls", False)
+            ):
                 continue
             current = controls[index]
             old = previous[index] if index < len(previous) else {}
@@ -291,15 +329,22 @@ class BattleSimulation:
         runtime._fixed_tick_items()
         source_computers = list(runtime.ai_controllers.values())
         for index, fighter in enumerate(runtime.fighters):
+            controller = runtime.ai_controllers.get(index)
             controls = (
                 controls_by_player[index]
-                if index < len(controls_by_player) and index not in runtime.ai_controllers
+                if index < len(controls_by_player)
+                and (
+                    controller is None
+                    or bool(getattr(controller, "uses_simulation_controls", False))
+                )
                 else {}
             )
             fighter.advance_pre_game_tick(controls)
             fighter.advance_intro_tick()
             if index < len(source_computers):
-                source_computers[index].fixed_tick(runtime.fighters)
+                source_controller = source_computers[index]
+                if not bool(getattr(source_controller, "uses_simulation_controls", False)):
+                    source_controller.fixed_tick(runtime.fighters)
         if runtime.match_state == "countdown":
             runtime._step_camera()
 
@@ -309,9 +354,14 @@ class BattleSimulation:
         # Preserve the dense Computers[] indexing quirk from the AVM1 source.
         source_computers = list(runtime.ai_controllers.values())
         for index, fighter in enumerate(runtime.fighters):
+            controller = runtime.ai_controllers.get(index)
             controls = (
                 player_controls[index]
-                if index < len(player_controls) and index not in runtime.ai_controllers
+                if index < len(player_controls)
+                and (
+                    controller is None
+                    or bool(getattr(controller, "uses_simulation_controls", False))
+                )
                 else {}
             )
             fighter.fixed_tick(
@@ -331,7 +381,9 @@ class BattleSimulation:
                 runtime._resolve_melee_hits(fighter)
             fighter.finish_post_collision_tick()
             if index < len(source_computers):
-                source_computers[index].fixed_tick(runtime.fighters)
+                source_controller = source_computers[index]
+                if not bool(getattr(source_controller, "uses_simulation_controls", False)):
+                    source_controller.fixed_tick(runtime.fighters)
         for bullet in runtime.bullets:
             bullet.fixed_tick(runtime.stage)
         for rocket in runtime.rockets:

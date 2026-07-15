@@ -74,6 +74,26 @@ def snap_to_device_pixel(value: float, pixel_ratio: float) -> float:
     return round(float(value) * ratio) / ratio
 
 
+def recommended_window_size(default: tuple[int, int]) -> tuple[int, int]:
+    """Return the browser canvas size requested by the isolated mobile entry.
+
+    Desktop launches never set these variables and therefore retain the exact
+    historical window size.  The web entry supplies physical canvas pixels so
+    a Retina screen is crisp without asking Safari to decode the 4x originals.
+    """
+
+    try:
+        width = int(os.environ.get("GLORTON_WEB_WIDTH", "0"))
+        height = int(os.environ.get("GLORTON_WEB_HEIGHT", "0"))
+    except ValueError:
+        return default
+    if width <= 0 or height <= 0:
+        return default
+    width, height = max(width, height), min(width, height)
+    scale = min(1.0, 1920 / width, 1080 / height)
+    return max(960, round(width * scale)), max(540, round(height * scale))
+
+
 def aligned_aspect_rect(
     size: tuple[int, int],
     reference_size: tuple[int, int] = (600, 400),

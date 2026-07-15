@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -15,7 +16,7 @@ except ImportError:
 
 
 REFERENCE_SIZE = (600, 400)
-EXPORT_SCALE = 4
+EXPORT_SCALE = max(1, min(4, int(os.environ.get("GLORTON_ASSET_SCALE", "4"))))
 CANVAS_SIZE = (REFERENCE_SIZE[0] * EXPORT_SCALE, REFERENCE_SIZE[1] * EXPORT_SCALE)
 
 
@@ -678,13 +679,21 @@ class MainMenu:
                             self.player_levels[index] = max(minimum, self.player_levels[index] - 1)
                             return None
                         if self._player_local_rect("increment").move(origin).collidepoint(ref_pos):
-                            maximum = int(self.player_select_data.get("ai_level_max", 20))
+                            maximum = self._maximum_ai_level()
                             self.player_levels[index] = min(maximum, self.player_levels[index] + 1)
                             return None
                     if self._player_local_rect("toggle").move(origin).collidepoint(ref_pos):
                         self._toggle_player(index)
                         return None
         return None
+
+    def _maximum_ai_level(self) -> int:
+        source_maximum = int(self.player_select_data.get("ai_level_max", 20))
+        if os.environ.get("GLORTON_AI22_MODEL"):
+            return max(22, source_maximum)
+        if os.environ.get("GLORTON_AI21_MODEL"):
+            return max(21, source_maximum)
+        return source_maximum
 
     def _adjust_limit(self, direction: int) -> None:
         if self.limit_mode == "stock":

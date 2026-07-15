@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import math
+import os
 import random
+import sys
 import webbrowser
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -13,14 +16,21 @@ import pygame
 try:
     from .assets import LazySurfaceMap, LazySurfaceSequence, SURFACE_CACHE
     from .audio import AudioManager
-    from .display import DisplayMetrics, aligned_aspect_rect, detect_display_metrics
+    from .display import (
+        DisplayMetrics,
+        aligned_aspect_rect,
+        detect_display_metrics,
+        recommended_window_size,
+    )
     from .menu import MainMenu, MatchResults, MenuAction
+    from .mobile_controls import MobileControls
     from .simulation import BattleSimulation
 except ImportError:
     from assets import LazySurfaceMap, LazySurfaceSequence, SURFACE_CACHE
     from audio import AudioManager
-    from display import DisplayMetrics, aligned_aspect_rect, detect_display_metrics
+    from display import DisplayMetrics, aligned_aspect_rect, detect_display_metrics, recommended_window_size
     from menu import MainMenu, MatchResults, MenuAction
+    from mobile_controls import MobileControls
     from simulation import BattleSimulation
 
 
@@ -2597,6 +2607,7 @@ class AIController:
 
 class RuntimeApp:
     def __init__(self, random_seed: int = 0) -> None:
+        self.mobile_controls = MobileControls()
         self.manifest = load_manifest()
         self.stage = Stage(self.manifest)
         self.bullets: list[Bullet] = []
@@ -2843,29 +2854,68 @@ class RuntimeApp:
                 fighter.shielded = False
                 player_input.pending_shield_released = False
 
-    def run(self) -> None:
+    async def run_async(self) -> None:
+        """Run on desktop or yield once per frame to the browser event loop."""
+
         pygame.init()
-        self.audio = AudioManager(ROOT)
-        screen = pygame.display.set_mode(WINDOW_SIZE, pygame.RESIZABLE)
+        browser_mode = sys.platform == "emscripten"
+        # Mobile Safari only permits audio after a user gesture. Desktop keeps
+        # its original eager audio path; the web build initializes on the first
+        # touch/click/key event instead.
+        self.audio = None if browser_mode else AudioManager(ROOT)
+        screen = pygame.display.set_mode(recommended_window_size(WINDOW_SIZE), pygame.RESIZABLE)
         self.display_metrics = detect_display_metrics(screen)
         pygame.display.set_caption("The Fight for Glorton")
         self.menu = MainMenu(ROOT, self.manifest)
         self.results = MatchResults(ROOT, self.manifest)
-        self.audio.set_muted(not self.menu.sound_on)
+        if self.audio is not None:
+            self.audio.set_muted(not self.menu.sound_on)
         last_sound_on = self.menu.sound_on
         clock = pygame.time.Clock()
         font = pygame.font.SysFont("menlo", 14)
         running = True
         while running:
             elapsed = clock.tick(60)
-            if last_sound_on and not self.menu.sound_on:
+            if self.audio is not None and last_sound_on and not self.menu.sound_on:
                 self.audio.stop_all()
                 self.menu_music_started = False
-            self.audio.set_muted(not self.menu.sound_on)
+            if self.audio is not None:
+                self.audio.set_muted(not self.menu.sound_on)
             last_sound_on = self.menu.sound_on
             for event in pygame.event.get():
+                if (
+                    browser_mode
+                    and self.audio is None
+                    and event.type
+                    in {
+                        pygame.KEYDOWN,
+                        pygame.MOUSEBUTTONDOWN,
+                        pygame.FINGERDOWN,
+                    }
+                ):
+                    self.audio = AudioManager(ROOT)
+                    self.audio.set_muted(not self.menu.sound_on)
                 if event.type == pygame.QUIT:
                     running = False
+                    continue
+                if self.mobile_controls.enabled and event.type in {
+                    pygame.FINGERDOWN,
+                    pygame.FINGERMOTION,
+                    pygame.FINGERUP,
+                }:
+                    if self.app_state == "battle":
+                        was_paused = self.paused
+                        self.mobile_controls.handle_battle_event(event, screen.get_size())
+                        if self.mobile_controls.take_pause_toggle():
+                            if self.match_state in {"loading", "countdown", "playing"}:
+                                self.paused = not self.paused
+                                self.mobile_controls.reset()
+                        elif was_paused:
+                            self.mobile_controls.post_mouse_event(event, screen.get_size())
+                        continue
+                    self.mobile_controls.post_mouse_event(event, screen.get_size())
+                    continue
+                if self.mobile_controls.ignore_synthetic_mouse(event):
                     continue
                 if self.app_state == "menu":
                     action = self.menu.handle_event(event, screen.get_size())
@@ -2928,6 +2978,15 @@ class RuntimeApp:
                     self.stage.set_time(self.stage_time_ms)
                     if self.match_state in {"loading", "countdown", "playing"}:
                         controls = [player_input.controls(keys) for player_input in self.inputs]
+                        mobile_player = next(
+                            (
+                                index
+                                for index in range(min(len(controls), len(self.fighters)))
+                                if index not in self.ai_controllers
+                            ),
+                            None,
+                        )
+                        self.mobile_controls.merge_into(controls, mobile_player)
                         self.simulation.step(controls, advance_clock=False)
                     self.accumulator -= TICK_MS
                 if self.match_state == "game_set" and not self.game_set_audio_played:
@@ -2951,9 +3010,17 @@ class RuntimeApp:
                     self._draw_output(screen, font)
                     if self.paused:
                         self._draw_pause_overlay(screen)
+                    if self.match_state in {"countdown", "playing"} or self.paused:
+                        self.mobile_controls.draw(screen, paused=self.paused)
             pygame.display.flip()
-        self.audio.stop_all()
-        pygame.quit()
+            await asyncio.sleep(0)
+        if self.audio is not None:
+            self.audio.stop_all()
+        if not browser_mode:
+            pygame.quit()
+
+    def run(self) -> None:
+        asyncio.run(self.run_async())
 
     def _handle_menu_action(self, action: MenuAction) -> bool:
         if action.kind == "quit":
@@ -2961,6 +3028,7 @@ class RuntimeApp:
         if action.kind == "return_main":
             self.app_state = "menu"
             self.paused = False
+            self.mobile_controls.reset()
             self.accumulator = 0
             self.menu.return_to_main()
             if self.audio is not None:
@@ -2984,6 +3052,7 @@ class RuntimeApp:
         self.stage = Stage(self.manifest, selected_stage)
         self.app_state = "battle"
         self.paused = False
+        self.mobile_controls.reset()
         self.match_end_elapsed_ms = 0
         self.accumulator = 0
         self.simulation.reset()
@@ -3062,9 +3131,8 @@ class RuntimeApp:
                 fighter.lives = 1
             self.fighters.append(fighter)
             if bool(config.get("computer", False)):
-                self.ai_controllers[index] = AIController(
+                self.ai_controllers[index] = self._create_ai_controller(
                     fighter,
-                    self.stage,
                     int(config.get("level", 7)),
                     force_victim=bool(config.get("endurance", False)),
                 )
@@ -3122,6 +3190,98 @@ class RuntimeApp:
         self._stage_foreground_cache = None
         self._stage_scene_cache_key = None
         self._stage_scene_cache = None
+
+    def _create_ai_controller(
+        self,
+        fighter: PeachFighter,
+        level: int,
+        *,
+        force_victim: bool = False,
+    ) -> object:
+        model22_path = os.environ.get("GLORTON_AI22_MODEL", "")
+        model_path = os.environ.get("GLORTON_AI21_MODEL", "")
+        tactical_model_path = ""
+        if os.environ.get("GLORTON_AI_TACTICAL") == "1" and not force_victim:
+            if level == 22 and model22_path:
+                tactical_model_path = model22_path
+            elif level == 21 and model_path:
+                tactical_model_path = model_path
+        if tactical_model_path:
+            try:
+                from training.tactical_deployment import TacticalTrainedAIController
+            except ImportError as exc:
+                raise RuntimeError(
+                    f"{level}级v3战术AI加载失败。请用 "
+                    ".venv-train/bin/python -m training.play_tactical 启动。"
+                ) from exc
+            if fighter.fighter_name != "PeachPlayer" or self.stage.name != "Mogadishu":
+                print(
+                    f"提示: {level}级v3模型只训练过 Peach vs Peach / Mogadishu；"
+                    f"当前是 {fighter.fighter_name} / {self.stage.name}，表现不代表真实强度。"
+                )
+            return TacticalTrainedAIController(
+                self,
+                fighter,
+                self.stage,
+                tactical_model_path,
+                level=level,
+            )
+        league_model_path = ""
+        if level == 22 and model22_path and not force_victim:
+            league_model_path = model22_path
+        elif (
+            level == 21
+            and model_path
+            and os.environ.get("GLORTON_AI21_HUMANIZED") == "1"
+            and not force_victim
+        ):
+            league_model_path = model_path
+        if league_model_path:
+            try:
+                from training.league_deployment import LeagueTrainedAIController
+            except ImportError as exc:
+                raise RuntimeError(
+                    f"{level}级联赛AI加载失败。请用 "
+                    ".venv-train/bin/python -m training.play_league 启动。"
+                ) from exc
+            if fighter.fighter_name != "PeachPlayer" or self.stage.name != "Mogadishu":
+                print(
+                    f"提示: {level}级联赛模型只训练过 Peach vs Peach / Mogadishu；"
+                    f"当前是 {fighter.fighter_name} / {self.stage.name}，表现不代表真实强度。"
+                )
+            return LeagueTrainedAIController(
+                self,
+                fighter,
+                self.stage,
+                league_model_path,
+                level=level,
+            )
+        if level == 21 and model_path and not force_victim:
+            try:
+                from training.deployment import TrainedAIController
+            except ImportError as exc:
+                raise RuntimeError(
+                    "21级AI加载失败。请用 .venv-train/bin/python -m training.play_level21 启动。"
+                ) from exc
+            if fighter.fighter_name != "PeachPlayer" or self.stage.name != "Mogadishu":
+                print(
+                    "提示: 21级模型只训练过 Peach vs Peach / Mogadishu；"
+                    f"当前是 {fighter.fighter_name} / {self.stage.name}，表现不代表真实强度。"
+                )
+            return TrainedAIController(
+                self,
+                fighter,
+                self.stage,
+                model_path,
+            )
+        # Level 21 is an opt-in trained model.  Without its launcher, retain
+        # the original menu/runtime contract of source-style levels 1--20.
+        return AIController(
+            fighter,
+            self.stage,
+            min(20, max(1, level)),
+            force_victim=force_victim,
+        )
 
     def _fixed_tick_countdown(self, player_controls: list[dict[str, bool]] | None = None) -> None:
         controls = BattleSimulation.normalize_inputs(player_controls, len(self.fighters))

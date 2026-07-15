@@ -112,6 +112,22 @@ class BattleSimulationTests(unittest.TestCase):
         simulation.step([])
         self.assertEqual(simulation.snapshot()["stage_time_ms"], before + 25)
 
+    def test_fast_step_matches_snapshot_step_without_returning_a_snapshot(self) -> None:
+        regular = BattleSimulation.headless(seed=73)
+        fast = BattleSimulation.headless(seed=73)
+        regular.runtime.match_state = "playing"
+        fast.runtime.match_state = "playing"
+        for simulation in (regular, fast):
+            for fighter in simulation.fighters:
+                fighter.intro_visible = True
+
+        for tick in range(40):
+            controls = self.scripted_inputs(tick)
+            regular.step(controls)
+            self.assertIsNone(fast.step_fast(controls))
+
+        self.assertEqual(fast.state_digest(), regular.state_digest())
+
 
 if __name__ == "__main__":
     unittest.main()

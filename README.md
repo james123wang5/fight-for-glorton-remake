@@ -193,9 +193,43 @@ simulation.replay(recording)  # strict=True 时同时校验初始与最终 SHA-2
 而不会静默构造不完整对象；这些动态实体可以在恢复后的输入步中正常生成。它与渲染
 循环完全分开，方便后续接权威服务器、状态校正和录像回放。
 
+## AI 训练
+
+已经提供独立的 Gymnasium/PPO 训练入口：固定 P1 桃子对原版逻辑 20 级 P2 桃子、
+Mogadishu、3 条命、180 秒上限并关闭道具。奖励以击出界和最终胜负为主，伤害仅作为
+较弱的塑形信号；动作包含移动、跳跃、手刀、枪、上特殊火箭和护盾的同时输入组合。
+
+训练依赖、模型和日志均与普通游戏隔离，运行 `python play.py` 不会进入训练规则。
+安装、基准、短训练、正式训练、续训、评估和录像命令见
+[`training/README.md`](training/README.md)。
+训练完成后可用 `python -m training.play_level21` 在菜单中临时开放 21 级模型，
+原版 1–20 级保持不变。
+
+第二阶段提供 21/22 双模型轮流自对战：使用真人式按键边沿与反应延迟，随机双方槽位，
+加入追击/回场课程、部分道具局，以及只在真实命中时计算的抱摔、上手刀、枪与火箭时机
+奖励。运行 `python -m training.train_league` 会同时更新并分别保存两套模型；训练后用
+`python -m training.play_league` 临时开放 21/22 级。普通 `python play.py` 仍只使用
+原版 1–20 级逻辑。
+
 `HIGH` 不再是 `MEDIUM` 的别名：战斗画面先按至少 2×（Retina 上采用系统 backing
 scale）渲染，再缩回最终窗口；`MEDIUM` 使用单次平滑缩放，`LOW` 使用最近邻缩放。
 可用 `GLORTON_PIXEL_RATIO=2` 覆盖自动检测，便于无 Retina 的 CI 做相同验证。
+
+## iPhone / PWA
+
+无需打开 Mac 的私有云端版已经部署：
+
+<https://glorton-mobile-fight.zeran-wang5.chatgpt.site>
+
+在 iPhone 的 Safari 中打开，用部署站点的同一个 ChatGPT/OpenAI 账号登录，保持页面
+在前台完成约 81 MiB 的首次下载；进入主菜单后即可“共享 → 添加到主屏幕”。以后从
+主屏幕图标启动，Mac 可以合盖或关机。完整安装、离线缓存和更新说明见
+[`mobile/README.md`](mobile/README.md)。
+
+手机版不是另一套战斗：Pygbag/WebAssembly 入口直接复用 `src/`，只在
+`GLORTON_MOBILE=1` 时加入左摇杆、`ATK`/`SP`/`DEF` 三键、暂停键、iPhone 安全区、
+横屏提示和 PWA 离线缓存。云端使用紧凑 1× 素材，本地可构建 2× Retina 素材；原有 `python play.py`、
+1–20 级 AI 和 21/22 级训练入口不会读取这个开关。
 
 ## 目录结构
 
@@ -207,11 +241,14 @@ glorton_remake/
 │   ├── runtime.py          # 固定步长战斗、角色、地图、摄像机和渲染
 │   ├── simulation.py       # 无画面固定步长、种子、快照、录像和回放
 │   ├── display.py          # Retina 检测、最终缩放和设备像素对齐
+│   ├── mobile_controls.py  # 仅手机入口启用的多点触控层
 │   ├── menu.py             # 原版菜单与流程
 │   ├── audio.py            # 声音注册和播放
 │   ├── assets.py           # 延迟加载和内存受限缓存
 │   └── visual_check.py     # 资源/时间轴检查工具
 ├── tests/                  # 对照与回归测试
+├── training/               # 独立 Gymnasium/PPO 训练、基准与评估
+├── mobile/                 # 隔离的 Pygbag/PWA 入口与文档
 ├── tools/                  # FFDec 资源导出和清单构建工具
 └── assets/                 # 本地生成，不提交到 Git
 ```

@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,height=device-height,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+  <meta name="theme-color" content="#000000">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Glorton">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <title>The Fight for Glorton</title>
+  <style>
+    html,body{width:100%;height:100%;margin:0;overflow:hidden;background:#050608;color:#fff;font-family:-apple-system,BlinkMacSystemFont,sans-serif}
+    main{height:100%;display:grid;place-content:center;text-align:center;padding:24px;box-sizing:border-box}
+    h1{margin:0 0 12px;font-size:clamp(24px,6vw,48px)}
+    p{margin:4px 0;color:#cbd5e1;line-height:1.5}.bar{width:min(72vw,360px);height:8px;margin:24px auto 0;border-radius:8px;background:#222a35;overflow:hidden}
+    .bar::after{display:block;width:42%;height:100%;border-radius:inherit;background:#ef4444;animation:load 1.15s ease-in-out infinite alternate;content:""}@keyframes load{to{transform:translateX(140%)}}
+  </style>
+</head>
+<body>
+  <main><div><h1>GLORTON</h1><p id="status">正在准备手机版…</p><p>首次需下载约 36 MiB，请保持 Safari 在前台。</p><div class="bar"></div></div></main>
+  <script>
+    (async () => {
+      const status = document.getElementById("status");
+      try {
+        if (!("serviceWorker" in navigator)) {
+          location.replace("./game.html");
+          return;
+        }
+        await navigator.serviceWorker.register("./sw.js", {scope: "./"});
+        await navigator.serviceWorker.ready;
+        if (!navigator.serviceWorker.controller) {
+          status.textContent = "正在安装离线组件…";
+          location.reload();
+          return;
+        }
+        location.replace("./game.html");
+      } catch (error) {
+        status.textContent = "启动失败，请检查网络后刷新。";
+        console.error(error);
+      }
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+{
+  "id": "./",
+  "name": "The Fight for Glorton",
+  "short_name": "Glorton",
+  "description": "The Fight for Glorton mobile web edition",
+  "lang": "zh-CN",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": ["fullscreen", "standalone"],
+  "orientation": "landscape",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "categories": ["games"],
+  "icons": [
+    {
+      "src": "apple-touch-icon.png",
+      "sizes": "242x241",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "prefer_related_applications": false
+}

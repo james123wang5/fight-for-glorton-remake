@@ -1,0 +1,28 @@
+{
+  "build_id": "3e302791df93",
+  "sha256": "3e302791df936e8ed9137bfdde72383d44b0cd8c73ed757503794cb557af1496",
+  "apk_size": 37359606,
+  "chunk_size": 8388608,
+  "chunks": [
+    {
+      "name": "chunks/app-000.bin",
+      "size": 8388608
+    },
+    {
+      "name": "chunks/app-001.bin",
+      "size": 8388608
+    },
+    {
+      "name": "chunks/app-002.bin",
+      "size": 8388608
+    },
+    {
+      "name": "chunks/app-003.bin",
+      "size": 8388608
+    },
+    {
+      "name": "chunks/app-004.bin",
+      "size": 3805174
+    }
+  ]
+}

@@ -539,5 +539,67 @@ cd '/Users/wenxinzheng/Desktop/一些无关紧要的项目/pythonpygame/glorton_
 真人和 AI 的逐帧输入及比赛结果。录制不会在对局中改写当前 21/22 冠军；后续只从
 这些录像训练独立候选，候选仍须通过技能考试、固定种子联赛和人工试玩后才能晋级。
 
+### 当前一轮：新策略→真人对战→模仿学习
+
+第一步，用已通过的 v5 基础再训一轮 21/22：
+
+```bash
+cd '/Users/wenxinzheng/Desktop/一些无关紧要的项目/pythonpygame/glorton_remake'
+.venv-train/bin/python -m training.train_v5 \
+  --resume \
+  --rounds 1 \
+  --steps-per-round 75000 \
+  --freeze-champions \
+  --device cpu
+```
+
+本轮会先完成尚未完成的混合基础课，再依次冻结 22 更新 21、冻结新 21
+更新 22。这次的策略变化是：远距离更主动找人，火箭只轻度收紧，组合技确认和顶部安全
+保持中等强度，平台导航、空追、脱离和连招专项课会随机化出生侧、高度、速度与伤害。
+
+第二步，试玩本轮候选并同时录像：
+
+```bash
+.venv-train/bin/python -m training.play_v5 --prefer-candidate --record-human
+```
+
+菜单中固定 `Peach vs Peach`、`STOCK 3`、`Mogadishu`、关闭道具，对手选 `CP 22`。
+每局结束后自动保存，无需退出游戏。建议至少打 3–5 局，有意演示主动追击、地面手刀、
+跳跃横移手刀、对空追击、对准后开枪、合理火箭和被击脱离。
+
+第三步，把新版可验证录像模仿到独立的 22 级候选：
+
+```bash
+.venv-train/bin/python -m training.learn_from_human \
+  --base training/checkpoints/peach_purpose_v5/candidate_level22_model.zip
+```
+
+它只接受 `glorton-input-recording-v2` 录像：开局与结束状态摘要都必须逐帧一致，旧 v1
+录像和不完整录像会自动跳过。静止帧和无目的蹲下不会成为示范。学习率仅 `5e-5`，并使用
+冻结基础策略的 KL 锚定，防止几局真人样本把原来的回场和导航能力洗掉。输出是
+`human_candidate_level22_model.zip`，不会覆盖当前冠军。
+
+先直接验收真人模仿候选：
+
+```bash
+.venv-train/bin/python -m training.play_v5 --prefer-candidate
+```
+
+如果它的出手风格正常，再用 21 级对手巩固一轮，防止只会模仿录像中出现过的局面：
+
+```bash
+.venv-train/bin/python -m training.train_v5 \
+  --resume \
+  --rounds 1 \
+  --steps-per-round 75000 \
+  --level22-seed training/checkpoints/peach_purpose_v5/human_candidate_level22_model.zip \
+  --freeze-champions \
+  --device cpu
+```
+
+`--prefer-candidate` 只改变当次试玩加载顺序；`--level22-seed` 只改变当次训练起点；
+`--freeze-champions` 明确禁止本次训练晋级。因此上面两次训练都不会改写
+`champion_level21_model.zip` 或 `champion_level22_model.zip`。
+
 v5 使用独立的 `training/checkpoints/peach_purpose_v5` 目录和 `GLORTON_AI_V5`
 启动开关，不会覆盖 v2/v3/v4 模型，普通 `play.py` 也不会加载它。

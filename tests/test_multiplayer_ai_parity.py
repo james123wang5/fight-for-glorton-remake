@@ -145,8 +145,15 @@ class MultiplayerAIParityTests(unittest.TestCase):
         runtime._handle_keydown(next(iter(runtime.inputs[0].right_keys)))
         runtime._handle_keydown(next(iter(runtime.inputs[0].punch_keys)))
         self.assertTrue(fighter.has_control)
+        # Desktop events are queued until the same authoritative 25 ms step
+        # used by replay/mobile/network, rather than mutating the fighter in
+        # the SDL event callback.
+        self.assertEqual((fighter.state, fighter.xinc), ("stop", 0.0))
+        controls = [item.controls(pygame.key.get_pressed()) for item in runtime.inputs]
+        runtime.simulation.step_fast(controls, advance_clock=False)
         self.assertEqual((fighter.state, fighter.xinc), ("goright", fighter.move_xinc))
         self.assertEqual(fighter.current_attack, "punchAir")
+        self.assertEqual(fighter.pos, start)
 
         animation_time = fighter.animation_time_ms
         runtime._fixed_tick_countdown([{}, {}])

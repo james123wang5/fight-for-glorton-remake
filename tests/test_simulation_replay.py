@@ -48,6 +48,8 @@ class BattleSimulationTests(unittest.TestCase):
         runtime.simulation.start_recording()
         runtime.simulation.step([{"punch_pressed": True}])
         recording = runtime.simulation.stop_recording()
+        self.assertEqual(recording["schema"], BattleSimulation.RECORDING_SCHEMA)
+        self.assertEqual(recording["clock_mode"], "fixed_pre_step")
         self.assertEqual(set(recording["inputs"][0][0]), set(INPUT_FIELDS))
         json.dumps(snapshot)
         json.dumps(recording)
@@ -178,6 +180,41 @@ class BattleSimulationTests(unittest.TestCase):
             self.assertEqual(recording["metadata"]["ai_levels"], {"1": 20})
             self.assertEqual(recording["metadata"]["end_reason"], "test_complete")
             self.assertFalse(runtime._human_recording_active)
+
+    def test_desktop_key_event_is_recorded_and_v2_replays_exactly(self) -> None:
+        runtime = RuntimeApp(random_seed=117)
+        runtime.match_config = {
+            "type": "vsmode",
+            "selected_stage": "Mogadishu",
+            "players": [
+                {"fighter": "PeachPlayer", "color": 0, "computer": False, "enabled": True},
+                {"fighter": "PeachPlayer", "color": 1, "computer": False, "enabled": True},
+            ],
+            "limit_mode": "stock",
+            "limit_value": 3,
+        }
+        runtime.stage = Stage(runtime.manifest, "Mogadishu")
+        runtime.simulation.reset()
+        runtime.match_state = "playing"
+        for fighter in runtime.fighters:
+            fighter.intro_visible = True
+
+        runtime.simulation.start_recording(
+            {
+                "kind": "test_human",
+                "human_slots": [0, 1],
+                "fighter_names": ["PeachPlayer", "PeachPlayer"],
+            }
+        )
+        runtime._handle_keydown(pygame.K_j)
+        controls = [item.controls(pygame.key.get_pressed()) for item in runtime.inputs]
+        runtime.simulation.step_fast(controls)
+        recording = runtime.simulation.stop_recording()
+
+        self.assertTrue(recording["authoritative_inputs"])
+        self.assertTrue(recording["inputs"][0][0]["punch_pressed"])
+        runtime.simulation.replay(recording)
+        self.assertEqual(runtime.simulation.state_digest(), recording["final_digest"])
 
 
 if __name__ == "__main__":

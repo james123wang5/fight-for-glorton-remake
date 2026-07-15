@@ -563,7 +563,13 @@ class V4PeachEnv(TacticalPeachEnv):
                 reward += 0.05 if self.curriculum in {"aim_static", "aim_moving"} else 0.02
             else:
                 outcome = "miss"
-                reward -= 0.03 if self.curriculum in {"aim_static", "aim_moving"} else 0.02
+                if self.curriculum in {"aim_static", "aim_moving"}:
+                    reward -= 0.03
+                else:
+                    # Rockets remain available as a real option, but their
+                    # large commitment receives a slightly stronger miss cost
+                    # than the pistol so the policy does not fire blindly.
+                    reward -= 0.025 if trial.kind == "rocket" else 0.02
             self._shot_outcomes[f"{trial.kind}_{outcome}"] += 1
             del self._projectile_trials[projectile_id]
         return reward

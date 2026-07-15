@@ -358,6 +358,16 @@ def main() -> None:
     parser.add_argument("--device", default="cpu", choices=("cpu", "mps", "auto"))
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
+        "--level22-seed",
+        type=Path,
+        help="用指定的22级候选开始本轮联赛；例如真人模仿候选",
+    )
+    parser.add_argument(
+        "--freeze-champions",
+        action="store_true",
+        help="保留当前冠军文件，本次只产生candidate和评估报告",
+    )
+    parser.add_argument(
         "--allow-unqualified-foundation",
         action="store_true",
         help="仅供小步数冒烟：技能考试未过也继续分叉21/22",
@@ -387,6 +397,13 @@ def main() -> None:
     teacher_path = args.teacher.expanduser().resolve()
     if not teacher_path.is_file():
         raise SystemExit(f"找不到v2老师模型: {teacher_path}")
+    level22_seed = (
+        args.level22_seed.expanduser().resolve()
+        if args.level22_seed is not None
+        else None
+    )
+    if level22_seed is not None and not level22_seed.is_file():
+        raise SystemExit(f"找不到22级起始候选: {level22_seed}")
 
     directory = ROOT / "training" / "checkpoints" / args.name
     log_dir = ROOT / "training" / "logs" / args.name
@@ -546,7 +563,13 @@ def main() -> None:
     env21 = Monitor(raw21, info_keywords=("outcome", "curriculum", "lesson_success"))
     env22 = Monitor(raw22, info_keywords=("outcome", "curriculum", "lesson_success"))
     source21 = candidate_paths[21] if args.resume and candidate_paths[21].is_file() else foundation_path
-    source22 = candidate_paths[22] if args.resume and candidate_paths[22].is_file() else foundation_path
+    source22 = (
+        level22_seed
+        if level22_seed is not None
+        else candidate_paths[22]
+        if args.resume and candidate_paths[22].is_file()
+        else foundation_path
+    )
     model21 = MaskablePPO.load(str(source21), env=env21, device=args.device, tensorboard_log=str(log_dir))
     model22 = MaskablePPO.load(str(source22), env=env22, device=args.device, tensorboard_log=str(log_dir))
     champions_path = directory / "champions.json"
@@ -609,9 +632,14 @@ def main() -> None:
             for level, model, evaluation in (
                 (21, model21, evaluation21), (22, model22, evaluation22)
             ):
-                evaluation["promoted"] = _promote(
-                    model, level=level, round_no=round_no,
-                    evaluation=evaluation, champions=champions, directory=directory,
+                evaluation["promotion_skipped"] = bool(args.freeze_champions)
+                evaluation["promoted"] = False if args.freeze_champions else _promote(
+                    model,
+                    level=level,
+                    round_no=round_no,
+                    evaluation=evaluation,
+                    champions=champions,
+                    directory=directory,
                 )
             _write_json(champions_path, champions)
             report = {"round": round_no, "level21": evaluation21, "level22": evaluation22}
@@ -622,7 +650,12 @@ def main() -> None:
             for level in (21, 22):
                 entry = champions.get("levels", {}).get(str(level), {})
                 champion_path = directory / str(entry.get("path", ""))
-                if entry.get("qualified") and champion_path.is_file() and not report[f"level{level}"]["promoted"]:
+                if (
+                    not args.freeze_champions
+                    and entry.get("qualified")
+                    and champion_path.is_file()
+                    and not report[f"level{level}"]["promoted"]
+                ):
                     replacement = MaskablePPO.load(
                         str(champion_path), env=env21 if level == 21 else env22,
                         device=args.device, tensorboard_log=str(log_dir),
@@ -635,8 +668,13 @@ def main() -> None:
         interrupted = True
         print("\n收到中断，正在保存v5候选模型……")
     finally:
-        _save_model(model21, candidate_paths[21])
-        _save_model(model22, candidate_paths[22])
+        # Completed rounds already saved their evaluated candidates before the
+        # gate.  Only an interrupted rollout needs a final emergency save;
+        # otherwise a fallback-to-champion model could overwrite the rejected
+        # candidate that the user still needs for manual inspection.
+        if interrupted:
+            _save_model(model21, candidate_paths[21])
+            _save_model(model22, candidate_paths[22])
         env21.close()
         env22.close()
 
@@ -650,6 +688,9 @@ def main() -> None:
         "physics_hz": 40,
         "policy_hz": V5_POLICY_HZ,
         "teacher": str(teacher_path),
+        "level21_seed": str(source21),
+        "level22_seed": str(source22),
+        "champions_frozen": bool(args.freeze_champions),
         "skill_exams": skill_reports,
         "evaluation_history": evaluation_history,
         "normal_game_training_overrides": False,

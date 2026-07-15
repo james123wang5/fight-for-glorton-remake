@@ -413,6 +413,11 @@ def purpose_action_mask(
         intercept["reachable"]
         and (not navigation_required or above_route_obstacle)
         and (
+            opponent.state != "thrown"
+            or opponent.last_sender is fighter
+            or distance <= 125.0
+        )
+        and (
             opponent.state == "thrown"
             or not opponent.on_ground
             or (not fighter.on_ground and distance <= 150.0)
@@ -434,8 +439,15 @@ def purpose_action_mask(
         and abs(float(context["lead_y"])) <= 32.0
         and controller.adapter.shoot_rearm <= 0
     )
+    vertical_rocket = bool(
+        dy < -55.0
+        and abs(float(context["dx"])) <= 150.0
+        and context["target_in_front"]
+    )
     mask[Purpose.ROCKET] = bool(
-        fighter.spec_up_ok and (context["rocket_opportunity"] or dy < -55.0)
+        fighter.spec_up_ok
+        and distance >= 45.0
+        and (context["rocket_opportunity"] or vertical_rocket)
     )
     mask[Purpose.HITSTUN_ESCAPE] = False
     mask[Purpose.EVADE] = threat

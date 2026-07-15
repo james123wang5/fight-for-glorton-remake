@@ -161,42 +161,71 @@ class V5PeachEnv(V4PeachEnv):
                 self.opponent.facing = side
                 self._lesson_target_platform = wall
                 return
-        platform = self._lesson_platform()
+        roof_candidates = [
+            item
+            for item in self.runtime.stage.platforms
+            if not item.moving
+            and 130 <= item.rect.w <= 260
+            and item.rect.h >= 100
+            and item.rect.top >= self.runtime.stage.bounds.top + 120
+        ]
+        platform = (
+            roof_candidates[int(self.np_random.integers(0, len(roof_candidates)))]
+            if roof_candidates
+            else self._lesson_platform()
+        )
         center = float(platform.rect.centerx)
         if self.curriculum == "v5_air_chase":
-            self._place_fighter(self.agent, platform, center - 45)
-            self._place_fighter(self.opponent, platform, center + 35)
-            self.opponent.pos.y = float(platform.rect.top - 95)
+            side = -1.0 if self.np_random.random() < 0.5 else 1.0
+            agent_offset = float(self.np_random.uniform(30.0, 58.0))
+            target_offset = float(self.np_random.uniform(24.0, 52.0))
+            self._place_fighter(self.agent, platform, center - side * agent_offset)
+            self._place_fighter(self.opponent, platform, center + side * target_offset)
+            self.opponent.pos.y = max(
+                float(self.runtime.stage.bounds.top + 28),
+                float(platform.rect.top - self.np_random.uniform(62.0, 118.0)),
+            )
             self.opponent.prev_pos.update(self.opponent.pos)
             self.opponent.on_ground = False
             self.opponent.ground_platform = None
             self.opponent.state = "thrown"
             self.opponent.current_label = "thrown"
-            self.opponent.ctrl_loss = 650
-            self.opponent.xinc = float(self.np_random.choice((-2.0, 2.0)))
-            self.opponent.yinc = -6.0
-            self.opponent.damage_amnt = 70
+            self.opponent.last_sender = self.agent
+            self.opponent.ctrl_loss = int(self.np_random.integers(350, 751))
+            self.opponent.xinc = side * float(self.np_random.uniform(1.0, 3.5))
+            self.opponent.yinc = float(self.np_random.uniform(-7.5, -1.0))
+            self.opponent.damage_amnt = int(self.np_random.integers(45, 111))
+            self.agent.facing = int(side)
+            self.opponent.facing = -int(side)
             return
         if self.curriculum == "v5_escape":
-            self._place_fighter(self.agent, platform, center + 20)
-            self._place_fighter(self.opponent, platform, center - 10)
-            self.agent.pos.y = float(platform.rect.top - 95)
+            side = -1.0 if self.np_random.random() < 0.5 else 1.0
+            self._place_fighter(self.agent, platform, center + side * 20)
+            self._place_fighter(self.opponent, platform, center - side * 18)
+            self.agent.pos.y = max(
+                float(self.runtime.stage.bounds.top + 28),
+                float(platform.rect.top - self.np_random.uniform(62.0, 112.0)),
+            )
             self.agent.prev_pos.update(self.agent.pos)
             self.agent.on_ground = False
             self.agent.ground_platform = None
             self.agent.state = "thrown"
             self.agent.current_label = "thrown"
-            self.agent.ctrl_loss = 125
-            self.agent.jumpstate = 1
-            self.agent.xinc = float(self.np_random.choice((-1.5, 1.5)))
-            self.agent.yinc = -2.0
+            self.agent.ctrl_loss = int(self.np_random.choice((75, 100, 125, 150, 200)))
+            self.agent.jumpstate = int(self.np_random.choice((0, 1)))
+            self.agent.xinc = side * float(self.np_random.uniform(1.0, 3.5))
+            self.agent.yinc = float(self.np_random.uniform(-4.5, 1.5))
+            self.agent.facing = -int(side)
+            self.opponent.facing = int(side)
             return
         if self.curriculum == "v5_combo":
-            self._place_fighter(self.agent, platform, center - 35)
-            self._place_fighter(self.opponent, platform, center + 25)
-            self.opponent.damage_amnt = 65
-            self.agent.facing = 1
-            self.opponent.facing = -1
+            side = -1 if self.np_random.random() < 0.5 else 1
+            spacing = float(self.np_random.uniform(42.0, 72.0))
+            self._place_fighter(self.agent, platform, center - side * spacing / 2)
+            self._place_fighter(self.opponent, platform, center + side * spacing / 2)
+            self.opponent.damage_amnt = int(self.np_random.integers(35, 101))
+            self.agent.facing = side
+            self.opponent.facing = -side
             return
         super()._setup_lesson()
 

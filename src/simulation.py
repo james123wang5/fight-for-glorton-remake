@@ -141,7 +141,8 @@ class BattleSimulation:
     """
 
     SCHEMA = "glorton-battle-snapshot-v1"
-    RECORDING_SCHEMA = "glorton-input-recording-v1"
+    RECORDING_SCHEMA = "glorton-input-recording-v2"
+    LEGACY_RECORDING_SCHEMA = "glorton-input-recording-v1"
 
     def __init__(self, runtime: RuntimeApp, seed: int = 0, tick_ms: int = 25) -> None:
         self.runtime = runtime
@@ -153,6 +154,7 @@ class BattleSimulation:
         self._recording_metadata: dict[str, Any] = {}
         self._recording_initial_digest = ""
         self._recording_initial_snapshot: dict[str, Any] | None = None
+        self._recording_authoritative_inputs = False
         self._previous_controls: list[dict[str, bool]] = []
 
     @classmethod
@@ -234,6 +236,7 @@ class BattleSimulation:
         self._recording_metadata = {}
         self._recording_initial_digest = ""
         self._recording_initial_snapshot = None
+        self._recording_authoritative_inputs = False
         return self.snapshot()
 
     def step(
@@ -268,41 +271,56 @@ class BattleSimulation:
         inputs: Sequence[Mapping[str, Any]] | None,
         *,
         advance_clock: bool,
+        authoritative_inputs: bool = False,
     ) -> None:
         """Shared deterministic tick implementation for both public steps."""
 
         runtime = self.runtime
+        if advance_clock:
+            # The desktop/browser loop also advances the match clock in fixed
+            # simulation ticks.  Doing this before controller decisions keeps
+            # countdown transitions and recorded AI controls replayable.
+            runtime._advance_battle_time(self.tick_ms, accumulate=False)
         controls = self.normalize_inputs(inputs, len(runtime.fighters))
-        for index, controller in runtime.ai_controllers.items():
-            control_source = getattr(controller, "controls_for_tick", None)
-            if index >= len(controls) or not callable(control_source):
-                continue
-            generated = control_source(runtime.fighters)
-            controls[index] = {
-                field: bool(generated.get(field, False))
-                for field in INPUT_FIELDS
-            }
+        if not authoritative_inputs:
+            for index, controller in runtime.ai_controllers.items():
+                control_source = getattr(controller, "controls_for_tick", None)
+                if index >= len(controls) or not callable(control_source):
+                    continue
+                generated = control_source(runtime.fighters)
+                controls[index] = {
+                    field: bool(generated.get(field, False))
+                    for field in INPUT_FIELDS
+                }
         with self._activate_rng():
-            self._apply_control_edges(controls)
-            if advance_clock:
-                runtime._advance_battle_time(self.tick_ms)
-                runtime.accumulator = max(0, runtime.accumulator - self.tick_ms)
+            self._apply_control_edges(controls, authoritative_inputs=authoritative_inputs)
             runtime.stage.set_time(runtime.stage_time_ms)
             if runtime.match_state in {"loading", "countdown"}:
-                self._fixed_tick_countdown(controls)
+                self._fixed_tick_countdown(
+                    controls,
+                    authoritative_inputs=authoritative_inputs,
+                )
             elif runtime.match_state == "playing":
-                self._fixed_tick_match(controls)
+                self._fixed_tick_match(
+                    controls,
+                    authoritative_inputs=authoritative_inputs,
+                )
         if self._recording_inputs is not None:
             self._recording_inputs.append(copy.deepcopy(controls))
         self._previous_controls = copy.deepcopy(controls)
         self.tick_index += 1
 
-    def _apply_control_edges(self, controls: list[dict[str, bool]]) -> None:
+    def _apply_control_edges(
+        self,
+        controls: list[dict[str, bool]],
+        *,
+        authoritative_inputs: bool = False,
+    ) -> None:
         runtime = self.runtime
         previous = self._previous_controls
         for index, fighter in enumerate(runtime.fighters):
             controller = runtime.ai_controllers.get(index)
-            if controller is not None and not bool(
+            if not authoritative_inputs and controller is not None and not bool(
                 getattr(controller, "uses_simulation_controls", False)
             ):
                 continue
@@ -321,7 +339,12 @@ class BattleSimulation:
             if direction != old_direction:
                 fighter.move(direction)
 
-    def _fixed_tick_countdown(self, controls_by_player: list[dict[str, bool]]) -> None:
+    def _fixed_tick_countdown(
+        self,
+        controls_by_player: list[dict[str, bool]],
+        *,
+        authoritative_inputs: bool = False,
+    ) -> None:
         runtime = self.runtime
         # ItemGen is attached when the fight frame loads, before GameOn. Its
         # two-second timer therefore advances throughout loading/countdown in
@@ -334,21 +357,27 @@ class BattleSimulation:
                 controls_by_player[index]
                 if index < len(controls_by_player)
                 and (
-                    controller is None
+                    authoritative_inputs
+                    or controller is None
                     or bool(getattr(controller, "uses_simulation_controls", False))
                 )
                 else {}
             )
             fighter.advance_pre_game_tick(controls)
             fighter.advance_intro_tick()
-            if index < len(source_computers):
+            if not authoritative_inputs and index < len(source_computers):
                 source_controller = source_computers[index]
                 if not bool(getattr(source_controller, "uses_simulation_controls", False)):
                     source_controller.fixed_tick(runtime.fighters)
         if runtime.match_state == "countdown":
             runtime._step_camera()
 
-    def _fixed_tick_match(self, player_controls: list[dict[str, bool]]) -> None:
+    def _fixed_tick_match(
+        self,
+        player_controls: list[dict[str, bool]],
+        *,
+        authoritative_inputs: bool = False,
+    ) -> None:
         runtime = self.runtime
         runtime._fixed_tick_items()
         # Preserve the dense Computers[] indexing quirk from the AVM1 source.
@@ -359,7 +388,8 @@ class BattleSimulation:
                 player_controls[index]
                 if index < len(player_controls)
                 and (
-                    controller is None
+                    authoritative_inputs
+                    or controller is None
                     or bool(getattr(controller, "uses_simulation_controls", False))
                 )
                 else {}
@@ -380,7 +410,7 @@ class BattleSimulation:
             if fighter.resolve_attack_this_tick:
                 runtime._resolve_melee_hits(fighter)
             fighter.finish_post_collision_tick()
-            if index < len(source_computers):
+            if not authoritative_inputs and index < len(source_computers):
                 source_controller = source_computers[index]
                 if not bool(getattr(source_controller, "uses_simulation_controls", False)):
                     source_controller.fixed_tick(runtime.fighters)
@@ -535,6 +565,10 @@ class BattleSimulation:
         self._recording_metadata = copy.deepcopy(dict(metadata or {}))
         self._recording_initial_snapshot = self.snapshot()
         self._recording_initial_digest = self.digest(self._recording_initial_snapshot)
+        self._recording_authoritative_inputs = all(
+            bool(getattr(controller, "uses_simulation_controls", False))
+            for controller in self.runtime.ai_controllers.values()
+        )
 
     def stop_recording(self) -> dict[str, Any]:
         if self._recording_inputs is None:
@@ -546,6 +580,8 @@ class BattleSimulation:
             "stage": self.runtime.stage.name,
             "match_config": _json_safe(self.runtime.match_config),
             "metadata": _json_safe(self._recording_metadata),
+            "clock_mode": "fixed_pre_step",
+            "authoritative_inputs": self._recording_authoritative_inputs,
             "initial_digest": self._recording_initial_digest,
             "initial_snapshot": self._recording_initial_snapshot,
             "inputs": self._recording_inputs,
@@ -553,6 +589,7 @@ class BattleSimulation:
         }
         self._recording_inputs = None
         self._recording_initial_snapshot = None
+        self._recording_authoritative_inputs = False
         return recording
 
     def restore_snapshot(self, snapshot: Mapping[str, Any]) -> dict[str, Any]:
@@ -650,7 +687,8 @@ class BattleSimulation:
         return self.snapshot()
 
     def replay(self, recording: Mapping[str, Any], *, strict: bool = True) -> dict[str, Any]:
-        if recording.get("schema") != self.RECORDING_SCHEMA:
+        schema = str(recording.get("schema", ""))
+        if schema not in {self.RECORDING_SCHEMA, self.LEGACY_RECORDING_SCHEMA}:
             raise ValueError("Unsupported Glorton recording schema")
         match_config = recording.get("match_config")
         if isinstance(match_config, Mapping):
@@ -670,8 +708,16 @@ class BattleSimulation:
                 "Recording initial state does not match this match configuration "
                 f"({initial[:12]} != {expected_initial[:12]})"
             )
+        authoritative_inputs = bool(
+            schema == self.RECORDING_SCHEMA
+            and recording.get("authoritative_inputs", False)
+        )
         for controls in recording.get("inputs", []):
-            self.step(controls)
+            self._advance_once(
+                controls,
+                advance_clock=True,
+                authoritative_inputs=authoritative_inputs,
+            )
         final = self.state_digest()
         expected_final = str(recording.get("final_digest", ""))
         if strict and expected_final and final != expected_final:

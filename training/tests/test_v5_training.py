@@ -70,6 +70,33 @@ class V5TrainingGateTests(unittest.TestCase):
             )
             self.assertEqual(resolve_model(directory, 22, allow_candidate=False), champion.resolve())
 
+    def test_human_candidate_can_be_preferred_without_replacing_champion(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            champion = directory / "champion_level22_model.zip"
+            human_candidate = directory / "human_candidate_level22_model.zip"
+            champion.touch()
+            human_candidate.touch()
+            (directory / "champions.json").write_text(
+                json.dumps(
+                    {"levels": {"22": {"qualified": True, "path": champion.name}}}
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                resolve_model(
+                    directory,
+                    22,
+                    allow_candidate=False,
+                    prefer_candidate=True,
+                ),
+                human_candidate.resolve(),
+            )
+            self.assertEqual(
+                resolve_model(directory, 22, allow_candidate=False),
+                champion.resolve(),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

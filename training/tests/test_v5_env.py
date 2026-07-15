@@ -135,7 +135,9 @@ class V5PurposeEnvironmentTests(unittest.TestCase):
             options={"curriculum": "v5_air_chase", "agent_slot": 0, "items_enabled": False},
         )
         info = {}
-        for _ in range(15):
+        # Randomized velocity/height lessons may need one extra 100 ms
+        # decision compared with the former fixed trajectory.
+        for _ in range(24):
             mask = self.env.action_masks()
             action = Purpose.AIR_CHASE if mask[Purpose.AIR_CHASE] else Purpose.CONTINUE
             _observation, _reward, _terminated, truncated, info = self.env.step(int(action))
@@ -214,6 +216,48 @@ class V5PurposeEnvironmentTests(unittest.TestCase):
         mask = self.env.action_masks()
         self.assertTrue(mask[Purpose.NAVIGATE])
         self.assertFalse(mask[Purpose.AIR_CHASE])
+
+    def test_rocket_remains_available_for_a_valid_front_arc_but_not_behind(self) -> None:
+        self.env.reset(
+            seed=66,
+            options={"curriculum": "duel", "agent_slot": 0, "items_enabled": False},
+        )
+        platform = self.env.agent.ground_platform or self.env._lesson_platform()
+        self.env._place_fighter(self.env.agent, platform, float(platform.rect.centerx) - 50)
+        self.env._place_fighter(self.env.opponent, platform, float(platform.rect.centerx) + 50)
+        self.env.agent.facing = 1
+        self.env.opponent.pos.y = self.env.agent.pos.y - 70
+        self.env.opponent.prev_pos.update(self.env.opponent.pos)
+        self.env.opponent.on_ground = False
+        self.env.opponent.ground_platform = None
+        self.assertTrue(self.env.action_masks()[Purpose.ROCKET])
+
+        self.env.opponent.pos.x = self.env.agent.pos.x - 100
+        self.env.opponent.prev_pos.update(self.env.opponent.pos)
+        self.assertFalse(self.env.action_masks()[Purpose.ROCKET])
+
+    def test_randomized_air_lessons_vary_but_stay_inside_source_bounds(self) -> None:
+        starts: set[tuple[int, int, int, int]] = set()
+        for seed in range(70, 76):
+            self.env.reset(
+                seed=seed,
+                options={
+                    "curriculum": "v5_air_chase",
+                    "agent_slot": 0,
+                    "items_enabled": False,
+                },
+            )
+            starts.add(
+                (
+                    round(self.env.agent.pos.x),
+                    round(self.env.opponent.pos.x),
+                    round(self.env.opponent.pos.y),
+                    round(self.env.opponent.yinc),
+                )
+            )
+            self.assertGreater(self.env.agent.pos.y, self.env.runtime.stage.bounds.top)
+            self.assertGreater(self.env.opponent.pos.y, self.env.runtime.stage.bounds.top)
+        self.assertGreater(len(starts), 1)
 
     def test_deployment_uses_v5_observation_and_purpose_mask(self) -> None:
         self.env.reset(

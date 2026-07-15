@@ -21,7 +21,21 @@ def _manifest(directory: Path) -> dict[str, Any]:
         return {}
 
 
-def resolve_model(directory: Path, level: int, *, allow_candidate: bool) -> Path:
+def resolve_model(
+    directory: Path,
+    level: int,
+    *,
+    allow_candidate: bool,
+    prefer_candidate: bool = False,
+) -> Path:
+    if prefer_candidate:
+        preferred = []
+        if level == 22:
+            preferred.append(directory / "human_candidate_level22_model.zip")
+        preferred.append(directory / f"candidate_level{level}_model.zip")
+        for candidate in preferred:
+            if candidate.is_file():
+                return candidate.resolve()
     entry = _manifest(directory).get("levels", {}).get(str(level), {})
     if entry.get("qualified"):
         champion = directory / str(entry.get("path", f"champion_level{level}_model.zip"))
@@ -42,6 +56,11 @@ def main() -> None:
     parser.add_argument("--level22", type=Path)
     parser.add_argument("--allow-candidate", action="store_true")
     parser.add_argument(
+        "--prefer-candidate",
+        action="store_true",
+        help="优先试玩独立候选：22级先选真人模仿候选，不覆盖冠军",
+    )
+    parser.add_argument(
         "--record-human",
         action="store_true",
         help="保存真人对战的逐帧输入和状态，供后续离线模仿/强化训练",
@@ -57,12 +76,22 @@ def main() -> None:
         level21 = (
             args.level21.expanduser().resolve()
             if args.level21 is not None
-            else resolve_model(directory, 21, allow_candidate=args.allow_candidate)
+            else resolve_model(
+                directory,
+                21,
+                allow_candidate=args.allow_candidate,
+                prefer_candidate=args.prefer_candidate,
+            )
         )
         level22 = (
             args.level22.expanduser().resolve()
             if args.level22 is not None
-            else resolve_model(directory, 22, allow_candidate=args.allow_candidate)
+            else resolve_model(
+                directory,
+                22,
+                allow_candidate=args.allow_candidate,
+                prefer_candidate=args.prefer_candidate,
+            )
         )
     except FileNotFoundError as exc:
         raise SystemExit(str(exc)) from exc
@@ -87,6 +116,8 @@ def main() -> None:
     print(f"v5目的驱动22级: {level22}")
     if args.allow_candidate:
         print("当前允许candidate：仅用于人工验收，不代表已通过冠军门槛。")
+    if args.prefer_candidate:
+        print("当前优先候选模型：仅用于实战验收，冻结冠军未改写。")
     print("建议: Peach vs Peach、STOCK 3、Mogadishu、关闭道具。")
     print("重点观察：越墙、空中横移手刀、受击第一帧脱离和无效二段跳。")
     if args.record_human:

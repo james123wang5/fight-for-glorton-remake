@@ -2923,44 +2923,16 @@ class RuntimeApp:
         for index, player_input in enumerate(self.inputs):
             if index >= len(self.fighters) or index in self.ai_controllers:
                 continue
-            fighter = self.fighters[index]
-            move = player_input.keydown(key)
-            if move is not None:
-                fighter.move(move)
-            if key in player_input.punch_keys:
-                if player_input.up_trace:
-                    fighter.attack("punch", "up")
-                    player_input.up_trace = False
-                fighter.attack("punch", "none")
-                player_input.pending_punch_pressed = False
-            elif key in player_input.special_keys:
-                if player_input.up_trace:
-                    fighter.attack("special", "up")
-                    player_input.up_trace = False
-                fighter.attack("special", "none")
-                player_input.pending_special_pressed = False
-            elif key in player_input.jump_keys:
-                fighter.jump()
-                player_input.pending_jump_pressed = False
-            elif key in player_input.shield_keys:
-                if fighter.xinc == 0:
-                    fighter.shielded = True
-                player_input.pending_shield_pressed = False
+            # Human events are queued and consumed by BattleSimulation on the
+            # next 25 ms tick.  Desktop, mobile, replay and network input now
+            # share one authoritative path instead of mutating fighters here.
+            player_input.keydown(key)
 
     def _handle_keyup(self, key: int) -> None:
         for index, player_input in enumerate(self.inputs):
             if index >= len(self.fighters) or index in self.ai_controllers:
                 continue
-            fighter = self.fighters[index]
-            move = player_input.keyup(key)
-            if move is not None:
-                fighter.move(move)
-            if key in player_input.up_keys:
-                fighter.jump()
-                player_input.pending_jump_pressed = False
-            elif key in player_input.shield_keys:
-                fighter.shielded = False
-                player_input.pending_shield_released = False
+            player_input.keyup(key)
 
     async def run_async(self) -> None:
         """Run on desktop or yield once per frame to the browser event loop."""
@@ -3082,7 +3054,8 @@ class RuntimeApp:
                 self.results.update(elapsed)
                 self.results.draw(screen)
             else:
-                self._advance_battle_time(elapsed)
+                if not self.paused and self.match_state in {"loading", "countdown", "playing"}:
+                    self.accumulator += max(0, elapsed)
                 keys = pygame.key.get_pressed()
                 while not self.paused and self.accumulator >= TICK_MS:
                     self.stage.set_time(self.stage_time_ms)
@@ -3097,7 +3070,7 @@ class RuntimeApp:
                             None,
                         )
                         self.mobile_controls.merge_into(controls, mobile_player)
-                        self.simulation.step(controls, advance_clock=False)
+                        self.simulation.step(controls, advance_clock=True)
                     self.accumulator -= TICK_MS
                 self._flush_human_recording()
                 if self.match_state == "game_set" and not self.game_set_audio_played:
@@ -3862,7 +3835,7 @@ class RuntimeApp:
         if getattr(self, "_human_recording_active", False):
             self._human_recording_pending_reason = "game_set"
 
-    def _advance_battle_time(self, elapsed_ms: int) -> None:
+    def _advance_battle_time(self, elapsed_ms: int, *, accumulate: bool = True) -> None:
         elapsed_ms = max(0, elapsed_ms)
         if self.match_state == "loading":
             self.match_loading_elapsed_ms += elapsed_ms
@@ -3872,7 +3845,8 @@ class RuntimeApp:
         if self.paused:
             return
         self.stage_time_ms += elapsed_ms
-        self.accumulator += elapsed_ms
+        if accumulate:
+            self.accumulator += elapsed_ms
 
     def _pre_end_duration_ms(self) -> float:
         data = self.manifest.get("results", {})

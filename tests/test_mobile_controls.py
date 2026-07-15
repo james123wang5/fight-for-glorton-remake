@@ -103,6 +103,36 @@ class MobileControlsTests(unittest.TestCase):
         self.assertTrue(controls.take_pause_toggle())
         self.assertFalse(controls.take_pause_toggle())
 
+    def test_menu_touch_keeps_only_our_translated_mouse_event(self) -> None:
+        controls = MobileControls(enabled=True)
+        point = pygame.Vector2(800, 400)
+        pygame.event.clear()
+        controls.post_mouse_event(
+            self.finger_event(pygame.FINGERDOWN, 42, point),
+            self.SIZE,
+        )
+        translated = pygame.event.poll()
+        self.assertEqual(translated.type, pygame.MOUSEBUTTONDOWN)
+        self.assertTrue(getattr(translated, "glorton_translated", False))
+        self.assertFalse(controls.ignore_synthetic_mouse(translated))
+
+        browser_duplicate = pygame.event.Event(
+            pygame.MOUSEBUTTONDOWN,
+            pos=(800, 400),
+            button=1,
+            touch=True,
+        )
+        self.assertTrue(controls.ignore_synthetic_mouse(browser_duplicate))
+
+        ordinary_mouse = pygame.event.Event(
+            pygame.MOUSEBUTTONDOWN,
+            pos=(800, 400),
+            button=1,
+            touch=False,
+        )
+        controls._last_touch_ms = pygame.time.get_ticks() - 1_000
+        self.assertFalse(controls.ignore_synthetic_mouse(ordinary_mouse))
+
     def test_mobile_canvas_size_is_bounded_and_desktop_default_is_unchanged(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(recommended_window_size((1280, 760)), (1280, 760))

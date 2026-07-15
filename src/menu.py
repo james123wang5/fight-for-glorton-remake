@@ -947,12 +947,7 @@ class MainMenu:
             color_index = min(index, 3)
             computer = self.computer_players[index]
             if enabled and computer:
-                box = self.player_boxes[color_index].copy()
-                number_patch = pygame.transform.smoothscale(
-                    box.subsurface(pygame.Rect(220, 64, 12, 104)).copy(),
-                    (82, 104),
-                )
-                box.blit(number_patch, (345, 64))
+                box = self._computer_player_box(color_index)
                 canvas.blit(box, (round(x * EXPORT_SCALE), round(y * EXPORT_SCALE)))
                 self._draw_center_text(
                     canvas,
@@ -1004,6 +999,32 @@ class MainMenu:
             go = self.buttons[1019].copy()
             go.fill((255, 220, 80, 255), special_flags=pygame.BLEND_RGBA_MULT)
             canvas.blit(go, (round(534.85 * EXPORT_SCALE - go.get_width() / 2), round(36.8 * EXPORT_SCALE - go.get_height() / 2)))
+
+    def _computer_player_box(self, color_index: int) -> pygame.Surface:
+        """Return a CP box with the source P-number field cleared.
+
+        The exported desktop sprites are 4x, while the compact phone bundle
+        uses 1x sprites.  These coordinates are expressed in the SWF's logical
+        pixels so both packages crop inside the actual surface.
+        """
+
+        box = self.player_boxes[color_index].copy()
+        source = pygame.Rect(
+            round(55.0 * EXPORT_SCALE),
+            round(16.0 * EXPORT_SCALE),
+            max(1, round(3.0 * EXPORT_SCALE)),
+            max(1, round(26.0 * EXPORT_SCALE)),
+        )
+        target_size = (
+            max(1, round(20.5 * EXPORT_SCALE)),
+            max(1, round(26.0 * EXPORT_SCALE)),
+        )
+        number_patch = pygame.transform.smoothscale(box.subsurface(source).copy(), target_size)
+        box.blit(
+            number_patch,
+            (round(86.25 * EXPORT_SCALE), round(16.0 * EXPORT_SCALE)),
+        )
+        return box
 
     def _draw_selection_preview(
         self,

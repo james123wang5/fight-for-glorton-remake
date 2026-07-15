@@ -685,7 +685,7 @@ class TacticalPeachEnv(PeachLeagueEnv):
         lesson_done = self.curriculum != "duel" and self._episode_ticks >= self.lesson_ticks
         truncated = (self._episode_ticks >= self.max_ticks or lesson_done) and not terminated
         outcome = self._outcome(terminated=terminated, truncated=truncated)
-        reward, components = super()._reward(before, outcome=outcome, terminated=terminated)
+        reward, components = self._reward(before, outcome=outcome, terminated=terminated)
         components["skill_timing"] += event_reward
         components["projectile_accuracy"] += projectile_reward
         components["shield_discipline"] += shield_reward

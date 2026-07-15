@@ -229,6 +229,18 @@ class MenuParityTests(unittest.TestCase):
             self.assertEqual(actual, bounds)
             self.assertLessEqual(len(points), 180)
 
+    def test_computer_player_box_crop_supports_compact_mobile_assets(self) -> None:
+        compact_box = pygame.Surface((136, 199), pygame.SRCALPHA)
+        compact_box.fill((32, 64, 96, 255))
+        original_boxes = self.menu.player_boxes
+        try:
+            self.menu.player_boxes = [compact_box] * 5
+            with patch("src.menu.EXPORT_SCALE", 1):
+                result = self.menu._computer_player_box(0)
+        finally:
+            self.menu.player_boxes = original_boxes
+        self.assertEqual(result.get_size(), (136, 199))
+
     def test_time_buttons_follow_source_piecewise_steps(self) -> None:
         self.menu.limit_mode = "time"
         cases = (

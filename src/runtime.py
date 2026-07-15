@@ -9,6 +9,7 @@ import sys
 import webbrowser
 from collections import OrderedDict
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import pygame
@@ -66,6 +67,26 @@ class Platform:
     rect: pygame.Rect
     moving: bool
     prev_rect: pygame.Rect | None = None
+
+
+@dataclass(frozen=True)
+class CollisionProbeFlags:
+    """The six source World.CollisionDetect point probes for one platform."""
+
+    left: bool = False
+    right: bool = False
+    left_bottom: bool = False
+    right_bottom: bool = False
+    bottom: bool = False
+    top: bool = False
+
+    @property
+    def side(self) -> bool:
+        return self.left or self.right
+
+    @property
+    def any(self) -> bool:
+        return self.side or self.left_bottom or self.right_bottom or self.bottom or self.top
 
 
 @dataclass
@@ -966,8 +987,10 @@ class Stage:
         self,
         old_x: float,
         new_x: float,
-        top: float,
-        bottom: float,
+        old_top: float,
+        old_bottom: float,
+        new_top: float,
+        new_bottom: float,
         half_width: float,
         ignored: Platform | None = None,
         include_moving: bool = True,
@@ -981,16 +1004,41 @@ class Stage:
         for platform in self.platforms:
             if platform is ignored or (platform.moving and not include_moving):
                 continue
-            if bottom <= platform.rect.top + 1 or top >= platform.rect.bottom - 1:
-                continue
             wall_x = platform.rect.left if moving_right else platform.rect.right
-            if min(old_side, new_side) <= wall_x <= max(old_side, new_side):
+            if not min(old_side, new_side) <= wall_x <= max(old_side, new_side):
+                continue
+            travel = new_side - old_side
+            crossing = 0.0 if abs(travel) < 1e-9 else (wall_x - old_side) / travel
+            crossing = max(0.0, min(1.0, crossing))
+            old_mid = (old_top + old_bottom) * 0.5
+            new_mid = (new_top + new_bottom) * 0.5
+            middle_y = old_mid + (new_mid - old_mid) * crossing
+            # The source only marks Left/Right when the corresponding body
+            # midpoint is inside the collision clip. A foot-only corner graze
+            # is handled by the bottom probes and is allowed to slide past.
+            if platform.rect.top <= middle_y < platform.rect.bottom:
                 candidates.append(platform)
         if not candidates:
             return None
         if moving_right:
             return min(candidates, key=lambda item: item.rect.left)
         return max(candidates, key=lambda item: item.rect.right)
+
+    @staticmethod
+    def collision_probe_flags(body: pygame.Rect, platform: Platform) -> CollisionProbeFlags:
+        """Classify a contact using the exact six point roles from World.as."""
+
+        rect = platform.rect
+        middle_y = (body.top + body.bottom) * 0.5
+        middle_x = (body.left + body.right) * 0.5
+        return CollisionProbeFlags(
+            left=rect.collidepoint(body.left, middle_y),
+            right=rect.collidepoint(body.right, middle_y),
+            left_bottom=rect.collidepoint(body.left, body.bottom),
+            right_bottom=rect.collidepoint(body.right, body.bottom),
+            bottom=rect.collidepoint(middle_x, body.bottom),
+            top=rect.collidepoint(middle_x, body.top),
+        )
 
     def projectile_hits_fixed(self, projectile_box: pygame.Rect) -> bool:
         # Projectile.as calls CollisionDetect(this, true, true, false, false):
@@ -1492,10 +1540,13 @@ class PeachFighter:
 
         self.pos.x += self.xinc
         predicted_y = old_y + self.yinc
+        body_before = self.body_rect_at(old_x, old_y)
         body_after_x = self.body_rect_at(self.pos.x, predicted_y)
         side_hit = stage.find_side_crossing(
             old_x,
             self.pos.x,
+            body_before.top,
+            body_before.bottom,
             body_after_x.top,
             body_after_x.bottom,
             self.body_half_width,
@@ -1548,8 +1599,58 @@ class PeachFighter:
             elif self.yinc != 8:
                 self.yinc = self.max_fall
 
+        if side_hit is None:
+            overlap_hit = self._resolve_source_side_overlap(stage, old_x, ignored)
+            if overlap_hit is not None:
+                if self.state == "thrown":
+                    self.xinc *= -1
+                    self.facing *= -1
+                    self.last_collision = "wall-bounce"
+                else:
+                    self.last_collision = "wall"
+
         if self.go_through_platform is not None and not self.body_rect().colliderect(self.go_through_platform.rect):
             self.go_through_platform = None
+
+    def _resolve_source_side_overlap(
+        self,
+        stage: Stage,
+        old_x: float,
+        ignored: Platform | None,
+    ) -> Platform | None:
+        """Push a midpoint side contact out without blocking source corner slides.
+
+        Swept tests handle normal and high-speed entries. This final guard is
+        for a fighter carried or spawned a few pixels into a wall. Requiring a
+        Left/Right midpoint probe preserves the original bottom-corner cases.
+        """
+
+        body = self.body_rect()
+        candidates: list[tuple[float, Platform, float]] = []
+        for platform in stage.platforms:
+            if platform is ignored or not body.colliderect(platform.rect):
+                continue
+            flags = stage.collision_probe_flags(body, platform)
+            if flags.left == flags.right:
+                continue
+            if flags.right:
+                resolved_x = float(platform.rect.left - self.body_half_width)
+            else:
+                resolved_x = float(platform.rect.right + self.body_half_width)
+            # Prefer the side consistent with the last valid center. If both
+            # are possible at a composite corner, take the smallest correction.
+            previous_was_left = old_x <= platform.rect.left - self.body_half_width
+            previous_was_right = old_x >= platform.rect.right + self.body_half_width
+            if previous_was_left:
+                resolved_x = float(platform.rect.left - self.body_half_width)
+            elif previous_was_right:
+                resolved_x = float(platform.rect.right + self.body_half_width)
+            candidates.append((abs(resolved_x - self.pos.x), platform, resolved_x))
+        if not candidates:
+            return None
+        _distance, platform, resolved_x = min(candidates, key=lambda item: item[0])
+        self.pos.x = resolved_x
+        return platform
 
     def _land_on_platform(self, platform: Platform) -> None:
         was_thrown = self.state == "thrown"
@@ -2607,6 +2708,13 @@ class AIController:
 
 class RuntimeApp:
     def __init__(self, random_seed: int = 0) -> None:
+        replay_dir = os.environ.get("GLORTON_HUMAN_REPLAY_DIR", "").strip()
+        self._human_replay_dir = (
+            Path(replay_dir).expanduser().resolve() if replay_dir else None
+        )
+        self._human_recording_active = False
+        self._human_recording_pending_reason = ""
+        self._human_recording_count = 0
         self.mobile_controls = MobileControls()
         self.manifest = load_manifest()
         self.stage = Stage(self.manifest)
@@ -2951,7 +3059,9 @@ class RuntimeApp:
                     elif event.key == pygame.K_F1:
                         self.show_debug = not self.show_debug
                     elif event.key == pygame.K_r:
+                        self._finish_human_recording("manual_reset")
                         self.simulation.reset()
+                        self._maybe_start_human_recording()
                     elif self.match_state not in {"loading", "countdown", "playing"}:
                         continue
                     else:
@@ -2989,6 +3099,7 @@ class RuntimeApp:
                         self.mobile_controls.merge_into(controls, mobile_player)
                         self.simulation.step(controls, advance_clock=False)
                     self.accumulator -= TICK_MS
+                self._flush_human_recording()
                 if self.match_state == "game_set" and not self.game_set_audio_played:
                     self._play_game_set_audio()
                 if self.match_state == "game_set" and not self.paused:
@@ -3014,6 +3125,7 @@ class RuntimeApp:
                         self.mobile_controls.draw(screen, paused=self.paused)
             pygame.display.flip()
             await asyncio.sleep(0)
+        self._finish_human_recording("window_closed")
         if self.audio is not None:
             self.audio.stop_all()
         if not browser_mode:
@@ -3024,8 +3136,10 @@ class RuntimeApp:
 
     def _handle_menu_action(self, action: MenuAction) -> bool:
         if action.kind == "quit":
+            self._finish_human_recording("quit")
             return False
         if action.kind == "return_main":
+            self._finish_human_recording("return_main")
             self.app_state = "menu"
             self.paused = False
             self.mobile_controls.reset()
@@ -3055,7 +3169,9 @@ class RuntimeApp:
         self.mobile_controls.reset()
         self.match_end_elapsed_ms = 0
         self.accumulator = 0
+        self._finish_human_recording("new_match")
         self.simulation.reset()
+        self._maybe_start_human_recording()
         if self.audio is not None:
             self.audio.stop_all()
             self.menu_music_started = False
@@ -3065,6 +3181,65 @@ class RuntimeApp:
             elif selected_stage == "B52":
                 self.audio.play_loop("jet_engine", "ambience")
         return True
+
+    def _maybe_start_human_recording(self) -> bool:
+        if self._human_replay_dir is None or self._human_recording_active:
+            return False
+        players = [
+            dict(item)
+            for item in self.match_config.get("players", [])
+            if item.get("enabled", True) and item.get("fighter")
+        ]
+        human_slots = [index for index, item in enumerate(players) if not item.get("computer")]
+        ai_slots = [index for index, item in enumerate(players) if item.get("computer")]
+        if not human_slots or not ai_slots:
+            return False
+        self._human_replay_dir.mkdir(parents=True, exist_ok=True)
+        self.simulation.start_recording(
+            {
+                "kind": "human_vs_ai",
+                "human_slots": human_slots,
+                "ai_slots": ai_slots,
+                "ai_levels": {
+                    str(index): int(players[index].get("level", 7)) for index in ai_slots
+                },
+                "fighter_names": [str(item.get("fighter", "")) for item in players],
+                "stage": self.stage.name,
+                "training_source": True,
+            }
+        )
+        self._human_recording_active = True
+        self._human_recording_pending_reason = ""
+        print(f"真人训练录像已开始: {self.stage.name} / AI {','.join(str(players[i].get('level', 7)) for i in ai_slots)}级")
+        return True
+
+    def _flush_human_recording(self) -> Path | None:
+        if not self._human_recording_pending_reason:
+            return None
+        reason = self._human_recording_pending_reason
+        self._human_recording_pending_reason = ""
+        return self._finish_human_recording(reason)
+
+    def _finish_human_recording(self, reason: str) -> Path | None:
+        if not self._human_recording_active or self._human_replay_dir is None:
+            return None
+        self._human_recording_active = False
+        self._human_recording_pending_reason = ""
+        recording = self.simulation.stop_recording()
+        metadata = recording.setdefault("metadata", {})
+        metadata["end_reason"] = str(reason)
+        metadata["winner"] = (
+            self.match_winner.name if self.match_winner is not None else None
+        )
+        metadata["game_time_seconds"] = int(self.game_time_seconds)
+        self._human_recording_count += 1
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        path = self._human_replay_dir / (
+            f"human_vs_ai_{stamp}_{self._human_recording_count:03d}.json"
+        )
+        BattleSimulation.save_recording(recording, path)
+        print(f"真人训练录像已保存: {path}")
+        return path
 
     def _sync_menu_music(self) -> None:
         if self.audio is None or self.app_state != "menu" or not self.menu.sound_on:
@@ -3200,6 +3375,76 @@ class RuntimeApp:
     ) -> object:
         model22_path = os.environ.get("GLORTON_AI22_MODEL", "")
         model_path = os.environ.get("GLORTON_AI21_MODEL", "")
+        web_v5_path = ""
+        if os.environ.get("GLORTON_AI_V5_WEB") == "1" and not force_victim:
+            if level == 22 and model22_path:
+                web_v5_path = model22_path
+            elif level == 21 and model_path:
+                web_v5_path = model_path
+        if web_v5_path:
+            try:
+                from .v5_web_deployment import WebV5AIController
+            except ImportError:
+                from v5_web_deployment import WebV5AIController
+            return WebV5AIController(
+                self,
+                fighter,
+                self.stage,
+                web_v5_path,
+                level=level,
+            )
+        v5_model_path = ""
+        if os.environ.get("GLORTON_AI_V5") == "1" and not force_victim:
+            if level == 22 and model22_path:
+                v5_model_path = model22_path
+            elif level == 21 and model_path:
+                v5_model_path = model_path
+        if v5_model_path:
+            try:
+                from training.v5_deployment import V5TrainedAIController
+            except ImportError as exc:
+                raise RuntimeError(
+                    f"{level}级v5目的驱动AI加载失败。请用 "
+                    ".venv-train/bin/python -m training.play_v5 启动。"
+                ) from exc
+            if fighter.fighter_name != "PeachPlayer" or self.stage.name != "Mogadishu":
+                print(
+                    f"提示: {level}级v5模型只训练过 Peach vs Peach / Mogadishu；"
+                    f"当前是 {fighter.fighter_name} / {self.stage.name}，表现不代表真实强度。"
+                )
+            return V5TrainedAIController(
+                self,
+                fighter,
+                self.stage,
+                v5_model_path,
+                level=level,
+            )
+        v4_model_path = ""
+        if os.environ.get("GLORTON_AI_V4") == "1" and not force_victim:
+            if level == 22 and model22_path:
+                v4_model_path = model22_path
+            elif level == 21 and model_path:
+                v4_model_path = model_path
+        if v4_model_path:
+            try:
+                from training.v4_deployment import V4TrainedAIController
+            except ImportError as exc:
+                raise RuntimeError(
+                    f"{level}级v4主动战斗AI加载失败。请用 "
+                    ".venv-train/bin/python -m training.play_v4 启动。"
+                ) from exc
+            if fighter.fighter_name != "PeachPlayer" or self.stage.name != "Mogadishu":
+                print(
+                    f"提示: {level}级v4模型只训练过 Peach vs Peach / Mogadishu；"
+                    f"当前是 {fighter.fighter_name} / {self.stage.name}，表现不代表真实强度。"
+                )
+            return V4TrainedAIController(
+                self,
+                fighter,
+                self.stage,
+                v4_model_path,
+                level=level,
+            )
         tactical_model_path = ""
         if os.environ.get("GLORTON_AI_TACTICAL") == "1" and not force_victim:
             if level == 22 and model22_path:
@@ -3614,6 +3859,8 @@ class RuntimeApp:
         self.match_end_elapsed_ms = 0
         self.game_set_audio_played = False
         self.accumulator = 0
+        if getattr(self, "_human_recording_active", False):
+            self._human_recording_pending_reason = "game_set"
 
     def _advance_battle_time(self, elapsed_ms: int) -> None:
         elapsed_ms = max(0, elapsed_ms)

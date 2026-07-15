@@ -3,14 +3,17 @@ from __future__ import annotations
 import json
 import os
 import random
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 
 import pygame
 
-from src.runtime import RuntimeApp
+from src.runtime import RuntimeApp, Stage
 from src.simulation import BattleSimulation, INPUT_FIELDS
 
 
@@ -127,6 +130,54 @@ class BattleSimulationTests(unittest.TestCase):
             self.assertIsNone(fast.step_fast(controls))
 
         self.assertEqual(fast.state_digest(), regular.state_digest())
+
+    def test_human_vs_ai_capture_saves_complete_training_material_without_live_updates(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ,
+            {"GLORTON_HUMAN_REPLAY_DIR": directory},
+        ):
+            runtime = RuntimeApp(random_seed=84)
+            runtime.match_config = {
+                "type": "vsmode",
+                "selected_stage": "Mogadishu",
+                "players": [
+                    {
+                        "fighter": "PeachPlayer",
+                        "color": 0,
+                        "computer": False,
+                        "enabled": True,
+                        "level": 7,
+                    },
+                    {
+                        "fighter": "PeachPlayer",
+                        "color": 1,
+                        "computer": True,
+                        "enabled": True,
+                        "level": 20,
+                    },
+                ],
+                "limit_mode": "stock",
+                "limit_value": 3,
+            }
+            runtime.stage = Stage(runtime.manifest, "Mogadishu")
+            runtime.simulation.reset()
+            runtime.match_state = "playing"
+            for fighter in runtime.fighters:
+                fighter.intro_visible = True
+
+            self.assertTrue(runtime._maybe_start_human_recording())
+            runtime.simulation.step_fast([{"right": True}, {}])
+            runtime.simulation.step_fast([{"punch_pressed": True}, {}])
+            path = runtime._finish_human_recording("test_complete")
+
+            self.assertIsNotNone(path)
+            self.assertTrue(Path(path).is_file())
+            recording = BattleSimulation.load_recording(path)
+            self.assertEqual(len(recording["inputs"]), 2)
+            self.assertEqual(recording["metadata"]["human_slots"], [0])
+            self.assertEqual(recording["metadata"]["ai_levels"], {"1": 20})
+            self.assertEqual(recording["metadata"]["end_reason"], "test_complete")
+            self.assertFalse(runtime._human_recording_active)
 
 
 if __name__ == "__main__":

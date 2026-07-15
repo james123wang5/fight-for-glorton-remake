@@ -359,3 +359,185 @@ cd /Users/wenxinzheng/Desktop/一些无关紧要的项目/pythonpygame/glorton_r
 本地 M1 仍建议用 CPU。这是 232 维小型 MLP 和单环境物理模拟，MPS 的小批量数据搬运往往比
 计算更贵。正式配置是两个模型各 120 万步；建议预留 2–5 小时、1.5–2.5 GB 内存和
 约 80–120 MB 快照空间。实际时间会随散热、对局长度和后台负载变化。
+
+## 7. 第四阶段：主动追击、越墙和可晋级的 v4 AI
+
+v4 专门修正 v3 后期出现的“一个只开枪、一个蹲后面开盾”共同退化。
+它使用新的 252 维观察和独立模型目录，v2/v3 存档、普通 `play.py`、其他角色和
+其他地图配置都不会被训练覆盖。
+
+### 战斗约束
+
+- 无威胁且距离超过 130 时，必须主动向对手靠近；停止或后退不会被动作掩码接受。
+- 距离 78 以内优先开放手刀、上手刀和背后抱摔，近距离不允许用手枪代替近战。
+- 手枪只在 75–360 距离、面向正确、射线无遮挡且纵向预判误差不超过 32 时可用；
+  开枪后约 800 ms 才能再开枪。
+- 护盾只在投射物或真实近战威胁下可用，至少保持约 200 ms，最多保持约
+  500 ms，释放后约 700 ms 才能重开。同一次开盾只能记一次成功格挡。
+- 固定平台上的蹲下被禁止；空中快落和从移动平台下穿仍保留。
+- Fixed12/Fixed13 等窄墙使用原版六点探针语义：身体左/右中点命中才挡住，
+  只有脚部角点擦过时可滑过。同时保留扫掠检测，高速移动不能穿墙。
+
+### 共享基础、21/22 联赛和冠军门槛
+
+训练先用主动追击脚本、近战脚本、冻结的 v2 21 级和专项课训出一个
+`foundation_model.zip`，然后从同一个基础分叉出 21 和 22。更新 21 时 22 是冻结对手，
+更新 22 时 21 保持不变，所以 PPO 的一个 rollout 中不会遇到不停变化的对手。
+
+每轮都保存 `candidate_level21_model.zip` / `candidate_level22_model.zip`，但候选必须同时满足
+以下条件才会成为 `champion_*`：
+
+- 至少 60% 评估局真正决出胜负，且总胜率至少 35%；所有 `timeout_*` 都按失败评分。
+- 远距离发呆不超过 18%，撞墙停滞不超过 15%，护盾占用不超过 8%。
+- 假护盾率不超过 15%，开盾不超过每分钟 8 次。
+- 有足够的子弹和近战样本，投射物命中率至少 18%，近战机会利用率至少 25%。
+
+一旦已有合格冠军，后续未过门槛或分数更低的候选不会覆盖它，下轮也会回到
+冠军继续学习。这样两个模型不能通过一起蹲守来互相“证明”自己变强。
+
+### 先跑小规模验证
+
+这条命令是检查完整链路，这么少的步数不会训出强模型：
+
+```bash
+cd /Users/wenxinzheng/Desktop/一些无关紧要的项目/pythonpygame/glorton_remake
+.venv-train/bin/python -m training.train_v4 \
+  --foundation-steps 50000 \
+  --rounds 1 \
+  --steps-per-round 50000 \
+  --eval-episodes 10 \
+  --name peach_active_v4_test \
+  --device cpu
+```
+
+小规模模型很可能不过冠军门槛，用显式候选模式人工试玩：
+
+```bash
+.venv-train/bin/python -m training.play_v4 \
+  --directory training/checkpoints/peach_active_v4_test \
+  --allow-candidate
+```
+
+### 正式训练与试玩
+
+```bash
+.venv-train/bin/python -m training.train_v4 \
+  --foundation-steps 300000 \
+  --rounds 8 \
+  --steps-per-round 75000 \
+  --eval-episodes 40 \
+  --name peach_active_v4 \
+  --device cpu
+```
+
+被 `Ctrl-C` 中断后，脚本会保存当前 candidate。从同名目录继续：
+
+```bash
+.venv-train/bin/python -m training.train_v4 \
+  --rounds 4 \
+  --steps-per-round 75000 \
+  --eval-episodes 40 \
+  --name peach_active_v4 \
+  --device cpu \
+  --resume
+```
+
+两个级别都有合格冠军后，默认启动器只加载冠军：
+
+```bash
+.venv-train/bin/python -m training.play_v4
+```
+
+本地 M1 还是建议 CPU。这是单环境物理采样加小型 MLP，性能瓶颈主要在环境而不是
+矩阵计算，MPS 不一定更快。默认总量是 30 万共享基础加两个模型各 60 万步，
+可先用上面的小规模命令测出本机每万步时间，再线性估算正式训练时长。
+
+## 8. 第五阶段：有目的的 v5 连续战术 AI
+
+v5 不再让 PPO 每 100 ms 直接拼凑方向、跳跃和攻击键。策略只选择 14 种有名称的
+战术目的，然后由 40 Hz 执行器完成连续按键：追击、越墙、地面手刀、空中追击、对空手刀、
+抱摔、瞄准射击、火箭、击飞脱离、闪避、回场、护盾、有目的落地和继续当前计划。
+
+每个计划有最小承诺时间、目标点、期限、完成条件和失败条件。普通情况不能在计划中途每帧
+左右反转；只有回场、击飞脱离或实时威胁可以中断当前计划。
+
+### 墙体与空中追击
+
+- 舞台的每个屋顶和平台是导航节点，根据桃子的单跳、二段跳和水平速度建立可达边。
+- 即使双方都在 Fixed1，Fixed12/Fixed13 位于中间时也会生成“墙顶”临时路径点，
+  不会因为起点和终点同属 Fixed1 就一直贴墙走。
+- 在一跳轨迹已足够越过墙顶时禁止浪费二段跳。空中靠近目标 x 时会主动刹住水平速度以落在窄墙顶。
+- 空中追击预测对手未来 100–400 ms 的位置，先按住水平方向起跳，进入命中窗口后保持水平移动并触发 `punchAir`。
+- 被击飞者在 `ctrl_loss > 0` 时不能提前操作；v5 在控制即将恢复时缓存脱离方向，在第一个合法帧跳出 `thrown` 并横向避开下方追击。
+- 快落只属于有安全落点的落地/闪避计划。跳跃后 400 ms 内的无目的快落被执行器拦截。
+
+### 技能考试后才自对战
+
+共享基础依次学习平台导航、空中追击、击飞脱离、地面击飞接空中手刀，再进入混合课。
+正式模式下，任一技能考试未过就不会分叉 21/22，避免两个不会越墙的模型开始互相自证。
+
+冠军门槛额外检查：墙体停滞不超过 5%、有目的跳跃至少 90%、无效“跳+快落”不超过 1%、
+空中追击机会利用率至少 30%、空中手刀命中率至少 20%，同时保留真实胜负、枪法、护盾和超时门槛。
+
+### 先跑可玩的小规模版本
+
+这条命令约 10 万总步数。`--allow-unqualified-foundation` 只用于让小规模训练能生成
+21/22 candidate 供人工验收，不会绕过冠军门槛：
+
+```bash
+cd '/Users/wenxinzheng/Desktop/一些无关紧要的项目/pythonpygame/glorton_remake'
+.venv-train/bin/python -m training.train_v5 \
+  --navigation-steps 10000 \
+  --air-steps 10000 \
+  --escape-steps 10000 \
+  --combo-steps 10000 \
+  --mixed-steps 20000 \
+  --rounds 1 \
+  --steps-per-round 20000 \
+  --skill-eval-episodes 8 \
+  --eval-episodes 10 \
+  --lesson-seconds 8 \
+  --name peach_purpose_v5_test \
+  --device cpu \
+  --allow-unqualified-foundation
+```
+
+完成后试玩 candidate：
+
+```bash
+.venv-train/bin/python -m training.play_v5 \
+  --directory training/checkpoints/peach_purpose_v5_test \
+  --allow-candidate
+```
+
+### 正式训练
+
+```bash
+.venv-train/bin/python -m training.train_v5 --device cpu
+```
+
+默认先训 57 万步共享基础，再训 8 轮、每轮两个模型各 7.5 万步。如果技能考试未过，
+脚本会保存 `foundation_model.zip` 并在自对战前停止。继续同名基础：
+
+```bash
+.venv-train/bin/python -m training.train_v5 --device cpu --resume
+```
+
+两个级别都通过冠军门槛后：
+
+```bash
+.venv-train/bin/python -m training.play_v5
+```
+
+要把真人对战保存为后续模仿学习素材，可在桌面版开启录制：
+
+```bash
+.venv-train/bin/python -m training.play_v5 --record-human
+```
+
+每局会自动写入 `training/replays/human_v5/`，内容包括固定随机种子、初始状态、
+真人和 AI 的逐帧输入及比赛结果。录制不会在对局中改写当前 21/22 冠军；后续只从
+这些录像训练独立候选，候选仍须通过技能考试、固定种子联赛和人工试玩后才能晋级。
+
+v5 使用独立的 `training/checkpoints/peach_purpose_v5` 目录和 `GLORTON_AI_V5`
+启动开关，不会覆盖 v2/v3/v4 模型，普通 `play.py` 也不会加载它。

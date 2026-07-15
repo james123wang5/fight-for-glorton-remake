@@ -30,6 +30,8 @@ class TacticalInputAdapter:
     combat_cooldown_decisions: int = 2
     shield_min_hold_decisions: int = 2
     shield_rearm_decisions: int = 3
+    shield_max_hold_decisions: int = 0
+    shoot_rearm_decisions: int = 0
 
     def __post_init__(self) -> None:
         if self.frame_skip < 1:
@@ -43,6 +45,8 @@ class TacticalInputAdapter:
         self.combat_cooldown = 0
         self.shield_hold = 0
         self.shield_rearm = 0
+        self.shield_total_hold = 0
+        self.shoot_rearm = 0
         self.last_horizontal = 0
         self.last_action = np.zeros(2, dtype=np.int64)
         self.invalid_requests = 0
@@ -110,6 +114,16 @@ class TacticalInputAdapter:
         horizontal = self._horizontal_for_intent(movement, fighter, opponent)
         self.combat_cooldown = max(0, self.combat_cooldown - 1)
         self.shield_rearm = max(0, self.shield_rearm - 1)
+        self.shoot_rearm = max(0, self.shoot_rearm - 1)
+
+        if bool(fighter.shielded):
+            self.shield_total_hold += 1
+            if (
+                self.shield_max_hold_decisions > 0
+                and self.shield_total_hold > self.shield_max_hold_decisions
+            ):
+                self.shield_hold = 0
+                combat = 0
 
         if combat == 0:
             self.previous_combat = 0
@@ -123,6 +137,7 @@ class TacticalInputAdapter:
                 # The release decision itself starts the first 100 ms interval;
                 # storing N-1 here makes N=3 reopen exactly 300 ms later.
                 self.shield_rearm = max(0, self.shield_rearm_decisions - 1)
+                self.shield_total_hold = 0
                 self.previous_combat = 0
                 controls = [first]
                 controls.extend(self._held_controls(horizontal) for _ in range(self.frame_skip - 1))
@@ -135,6 +150,7 @@ class TacticalInputAdapter:
             if not bool(fighter.shielded) and self.shield_rearm <= 0:
                 first["shield_pressed"] = True
                 self.shield_hold = self.shield_min_hold_decisions
+                self.shield_total_hold = 1
                 self.shield_starts += 1
             elif self.shield_hold > 0:
                 self.shield_hold -= 1
@@ -158,6 +174,7 @@ class TacticalInputAdapter:
                 first["punch_pressed"] = True
             elif combat == 6:
                 first["special_pressed"] = True
+                self.shoot_rearm = self.shoot_rearm_decisions
             elif combat == 7:
                 first["up_trace"] = True
                 first["special_pressed"] = True
@@ -211,3 +228,9 @@ class TacticalInputAdapter:
             ]
         )
         return values
+
+    def v4_features(self) -> list[float]:
+        return [
+            self.shield_total_hold / max(1, self.shield_max_hold_decisions),
+            self.shoot_rearm / max(1, self.shoot_rearm_decisions),
+        ]

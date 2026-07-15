@@ -207,7 +207,13 @@ class MobileControls:
         translated: pygame.event.Event | None = None
         if event.type == pygame.FINGERDOWN and self._ui_finger is None:
             self._ui_finger = finger_id
-            translated = pygame.event.Event(pygame.MOUSEBUTTONDOWN, pos=pos, button=1, touch=True)
+            translated = pygame.event.Event(
+                pygame.MOUSEBUTTONDOWN,
+                pos=pos,
+                button=1,
+                touch=True,
+                glorton_translated=True,
+            )
         elif event.type == pygame.FINGERMOTION and self._ui_finger == finger_id:
             translated = pygame.event.Event(
                 pygame.MOUSEMOTION,
@@ -215,10 +221,17 @@ class MobileControls:
                 rel=(0, 0),
                 buttons=(1, 0, 0),
                 touch=True,
+                glorton_translated=True,
             )
         elif event.type == pygame.FINGERUP and self._ui_finger == finger_id:
             self._ui_finger = None
-            translated = pygame.event.Event(pygame.MOUSEBUTTONUP, pos=pos, button=1, touch=True)
+            translated = pygame.event.Event(
+                pygame.MOUSEBUTTONUP,
+                pos=pos,
+                button=1,
+                touch=True,
+                glorton_translated=True,
+            )
         if translated is not None:
             pygame.event.post(translated)
         return True
@@ -226,8 +239,14 @@ class MobileControls:
     def ignore_synthetic_mouse(self, event: pygame.event.Event) -> bool:
         if not self.enabled or event.type not in {pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION}:
             return False
-        if getattr(event, "touch", False):
+        # Keep the one mouse event we post from the primary finger, but drop
+        # SDL/browser compatibility mouse events generated for that same
+        # touch.  Without the explicit marker, a menu tap can toggle a player
+        # twice (human -> CPU -> human) or fire GO twice on mobile browsers.
+        if getattr(event, "glorton_translated", False):
             return False
+        if getattr(event, "touch", False):
+            return True
         return pygame.time.get_ticks() - self._last_touch_ms < 600
 
     def draw(self, screen: pygame.Surface, *, paused: bool = False) -> None:

@@ -1,0 +1,22 @@
+{
+  "scenario": "glorton-peach-purpose-v5",
+  "approved_utc": "2026-07-15T06:05:00Z",
+  "approval": "manual_human_review",
+  "source": "foundation_model.zip",
+  "levels": {
+    "21": {
+      "qualified": true,
+      "path": "champion_level21_model.zip",
+      "round": 0,
+      "score": 0.0,
+      "manual_approved": true
+    },
+    "22": {
+      "qualified": true,
+      "path": "champion_level22_model.zip",
+      "round": 0,
+      "score": 0.0,
+      "manual_approved": true
+    }
+  }
+}

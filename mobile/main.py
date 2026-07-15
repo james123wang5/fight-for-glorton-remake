@@ -4,9 +4,16 @@ import asyncio
 import os
 import sys
 
+# Pygbag detects browser wheels from top-level imports.  NumPy runs only the
+# exported actor network; Torch, Gymnasium and SB3 remain desktop-only.
+import numpy as np  # noqa: F401
+
 
 os.environ["GLORTON_MOBILE"] = "1"
 os.environ["GLORTON_ASSET_SCALE"] = "2"
+os.environ["GLORTON_AI_V5_WEB"] = "1"
+os.environ["GLORTON_AI21_MODEL"] = "assets/ai/v5_purpose_policy.npz"
+os.environ["GLORTON_AI22_MODEL"] = "assets/ai/v5_purpose_policy.npz"
 
 if sys.platform == "emscripten":
     # Pygbag exposes the browser window through its platform bridge.  Render at

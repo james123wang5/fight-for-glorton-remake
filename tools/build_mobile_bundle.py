@@ -18,7 +18,14 @@ SOURCE_MANIFEST = ROOT / "assets" / "manifests" / "glorton_manifest.json"
 BUILD_ROOT = ROOT / "build" / "mobile"
 APP_ROOT = BUILD_ROOT / "app"
 WEB_ROOT = APP_ROOT / "build" / "web"
-PRESERVED_TREES = ("menu", "audio", "fonts")
+PRESERVED_TREES = ("menu", "audio", "fonts", "ai")
+MOBILE_TRAINING_FILES = (
+    "__init__.py",
+    "tactical_input.py",
+    "v5_options.py",
+    "v5_runtime_helpers.py",
+    "v5_runtime_observation.py",
+)
 
 
 def _scaled_png(path: Path, *, asset_scale: int) -> bytes:
@@ -31,6 +38,20 @@ def _scaled_png(path: Path, *, asset_scale: int) -> bytes:
         )
         if image.size != target:
             image = image.resize(target, Image.Resampling.LANCZOS)
+        rgba = image.convert("RGBA")
+        alpha_histogram = rgba.getchannel("A").histogram()
+        transparent_ratio = sum(alpha_histogram[:255]) / max(1, rgba.width * rgba.height)
+        if asset_scale == 1 and transparent_ratio >= 0.15:
+            # The phone package contains roughly twenty thousand small PNGs.
+            # LANCZOS creates many near-identical edge colours, which doubles
+            # the download without adding visible detail at native 1x size.
+            # An adaptive RGBA palette keeps transparent sprite edges and map
+            # gradients while cutting the standalone PWA by about one third.
+            image = rgba.quantize(
+                colors=256,
+                method=Image.Quantize.FASTOCTREE,
+                dither=Image.Dither.FLOYDSTEINBERG,
+            )
         output = io.BytesIO()
         image.save(output, format="PNG", optimize=True, compress_level=9)
         return output.getvalue()
@@ -135,6 +156,10 @@ def prepare(*, asset_scale: int) -> dict[str, int]:
         APP_ROOT / "src",
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store"),
     )
+    training_target = APP_ROOT / "training"
+    training_target.mkdir(parents=True, exist_ok=True)
+    for name in MOBILE_TRAINING_FILES:
+        shutil.copy2(ROOT / "training" / name, training_target / name)
 
     manifest = json.loads(SOURCE_MANIFEST.read_text(encoding="utf-8"))
     hashed_files, hashed_bytes = _prepare_manifest_assets(manifest, asset_scale=asset_scale)

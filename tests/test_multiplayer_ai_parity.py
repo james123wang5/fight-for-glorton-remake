@@ -187,6 +187,32 @@ class MultiplayerAIParityTests(unittest.TestCase):
         self.assertEqual(controller.action_delay_ms, 25)
         self.assertEqual(controller.queued_action, ("punch", "none"))
 
+    def test_level20_mobile_match_keeps_advancing_and_cpu_acts(self) -> None:
+        runtime = self.runtime
+        runtime.match_config = {
+            "type": "vsmode",
+            "selected_stage": "Mogadishu",
+            "players": [
+                {"fighter": "PeachPlayer", "color": 0, "computer": False, "enabled": True, "level": 7},
+                {"fighter": "PeachPlayer", "color": 1, "computer": True, "enabled": True, "level": 20},
+            ],
+            "limit_mode": "stock",
+            "limit_value": 3,
+        }
+        runtime.stage = type(runtime.stage)(runtime.manifest, "Mogadishu")
+        runtime._reset_match()
+        runtime.ready_set = -1
+        runtime._apply_ready_step()
+        cpu = runtime.fighters[1]
+        start = pygame.Vector2(cpu.pos)
+        for _ in range(400):
+            runtime.simulation.step_fast([{}, {}])
+        controller = runtime.ai_controllers[1]
+        self.assertEqual(controller.level, 20)
+        self.assertEqual(runtime.simulation.tick_index, 400)
+        self.assertGreater(runtime.stage_time_ms, 0)
+        self.assertTrue(cpu.pos != start or cpu.current_attack or cpu.damage_amnt > 0)
+
     def test_dense_source_computer_array_runs_cpu_before_its_fighter_tick(self) -> None:
         runtime = self.configure_four()
         order: list[str] = []

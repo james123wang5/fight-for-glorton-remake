@@ -353,6 +353,12 @@ def main() -> None:
     parser.add_argument("--eval-max-seconds", type=float, default=90.0)
     parser.add_argument("--lesson-seconds", type=float, default=16.0)
     parser.add_argument("--history-size", type=int, default=6)
+    parser.add_argument(
+        "--autosave-steps",
+        type=int,
+        default=10_000,
+        help="训练期间覆盖保存最新检查点的步数间隔",
+    )
     parser.add_argument("--seed", type=int, default=20260726)
     parser.add_argument("--name", default="peach_purpose_v5")
     parser.add_argument("--device", default="cpu", choices=("cpu", "mps", "auto"))
@@ -377,6 +383,7 @@ def main() -> None:
     try:
         from sb3_contrib import MaskablePPO
         from stable_baselines3 import PPO
+        from stable_baselines3.common.callbacks import BaseCallback
         from stable_baselines3.common.monitor import Monitor
         from stable_baselines3.common.utils import set_random_seed
     except ImportError as exc:
@@ -390,7 +397,16 @@ def main() -> None:
         "escape_steps": args.escape_steps,
         "combo_steps": args.combo_steps,
     }
-    if any(value < 1 for value in (*phase_steps.values(), args.mixed_steps, args.rounds, args.steps_per_round)):
+    if any(
+        value < 1
+        for value in (
+            *phase_steps.values(),
+            args.mixed_steps,
+            args.rounds,
+            args.steps_per_round,
+            args.autosave_steps,
+        )
+    ):
         raise SystemExit("所有训练步数和轮数必须大于0")
     if args.skill_eval_episodes < 4 or args.eval_episodes < 10:
         raise SystemExit("技能评估至少4局，对战评估至少10局")
@@ -456,6 +472,33 @@ def main() -> None:
         _load_json(training_state_path, {}) if args.resume else {}
     )
 
+    class LatestModelCallback(BaseCallback):
+        """Keep one resumable checkpoint instead of accumulating snapshots."""
+
+        def __init__(self, path: Path, *, on_save: Any = None) -> None:
+            super().__init__(verbose=0)
+            self.path = path
+            self.on_save = on_save
+            self.last_saved_timestep = 0
+
+        def _on_training_start(self) -> None:
+            self.last_saved_timestep = int(self.model.num_timesteps)
+
+        def _on_step(self) -> bool:
+            current = int(self.model.num_timesteps)
+            if current - self.last_saved_timestep < args.autosave_steps:
+                return True
+            _save_model(self.model, self.path)
+            self.last_saved_timestep = current
+            if callable(self.on_save):
+                self.on_save(current)
+            print(f"\n自动保存: {self.path.name} @ {current:,} 步")
+            return True
+
+    def save_foundation_state(timesteps: int) -> None:
+        training_state["foundation_timesteps"] = int(timesteps)
+        _write_json(training_state_path, training_state)
+
     def begin_or_resume_phase(name: str, requested_steps: int) -> int:
         active = training_state.get("active_phase", {})
         if isinstance(active, Mapping) and active.get("name") == name:
@@ -501,6 +544,10 @@ def main() -> None:
                     total_timesteps=remaining,
                     reset_num_timesteps=False,
                     tb_log_name=f"{args.name}_{curriculum}",
+                    callback=LatestModelCallback(
+                        foundation_path,
+                        on_save=save_foundation_state,
+                    ),
                 )
             _save_model(foundation, foundation_path)
             report = evaluate_skill(
@@ -529,6 +576,10 @@ def main() -> None:
                     total_timesteps=remaining,
                     reset_num_timesteps=False,
                     tb_log_name=f"{args.name}_mixed_foundation",
+                    callback=LatestModelCallback(
+                        foundation_path,
+                        on_save=save_foundation_state,
+                    ),
                 )
             _save_model(foundation, foundation_path)
             training_state["mixed_foundation_complete"] = True
@@ -541,6 +592,14 @@ def main() -> None:
         _write_json(training_state_path, training_state)
         print(f"\n已保存v5共享基础: {foundation_path}\n继续时加 --resume。")
         return
+    except Exception:
+        _save_model(foundation, foundation_path)
+        foundation_env.close()
+        training_state["foundation_timesteps"] = int(foundation.num_timesteps)
+        _write_json(skill_exams_path, skill_reports)
+        _write_json(training_state_path, training_state)
+        print(f"\n异常前已保存v5共享基础: {foundation_path}")
+        raise
     foundation_env.close()
     training_state["skills_complete"] = all(
         bool(skill_reports.get(name, {}).get("passed")) for name, _argument, _rate in SKILL_PHASES
@@ -594,6 +653,7 @@ def main() -> None:
                 total_timesteps=args.steps_per_round,
                 reset_num_timesteps=False,
                 tb_log_name=f"{args.name}_level21",
+                callback=LatestModelCallback(candidate_paths[21]),
             )
             raw22.set_tactical_opponent_pool(
                 _league_pool(peer=model21, teacher=teacher, foundation=foundation_policy, history=history_models)
@@ -603,6 +663,7 @@ def main() -> None:
                 total_timesteps=args.steps_per_round,
                 reset_num_timesteps=False,
                 tb_log_name=f"{args.name}_level22",
+                callback=LatestModelCallback(candidate_paths[22]),
             )
             for level, model in ((21, model21), (22, model22)):
                 _save_model(model, candidate_paths[level])
@@ -667,6 +728,10 @@ def main() -> None:
     except KeyboardInterrupt:
         interrupted = True
         print("\n收到中断，正在保存v5候选模型……")
+    except Exception:
+        interrupted = True
+        print("\n训练异常，正在保存可续训的v5候选模型……")
+        raise
     finally:
         # Completed rounds already saved their evaluated candidates before the
         # gate.  Only an interrupted rollout needs a final emergency save;

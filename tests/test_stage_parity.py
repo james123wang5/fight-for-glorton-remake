@@ -99,6 +99,97 @@ class RooftopStageParityTests(unittest.TestCase):
             screen_pos = runtime._world_to_screen(fighter.pos, cam, zoom, viewport)
             self.assertTrue(viewport.inflate(2, 2).collidepoint(screen_pos))
 
+    def test_mogadishu_source_top_line_keeps_a_normal_double_jump_alive(self) -> None:
+        stage = Stage(self.manifest, "Mogadishu")
+        self.assertEqual(stage.bounds.top, -200)
+        self.assertEqual(stage.bounds_cam.top, -100)
+        platform = next(item for item in stage.platforms if item.name == "Moving2")
+        fighter = self.fighter(stage)
+        fighter.pos.update(platform.rect.centerx, platform.rect.top)
+        fighter.prev_pos.update(fighter.pos)
+        fighter.on_ground = True
+        fighter.ground_platform = platform
+        fighter.state = "stop"
+        fighter.has_control = True
+        fighter.fixed_tick(stage, {"jump_pressed": True})
+        minimum_y = float(fighter.pos.y)
+        second_jump = False
+        for _tick in range(80):
+            controls = {}
+            if not second_jump and fighter.jumpstate == 1 and fighter.yinc >= -3.0:
+                controls = {"jump_pressed": True}
+                second_jump = True
+            fighter.fixed_tick(stage, controls)
+            minimum_y = min(minimum_y, float(fighter.pos.y))
+            if fighter.dead:
+                break
+        self.assertTrue(second_jump)
+        self.assertEqual(minimum_y, -192.5)
+        self.assertFalse(fighter.dead)
+
+    def test_mogadishu_narrow_walls_use_source_midpoint_and_corner_probes(self) -> None:
+        stage = Stage(self.manifest, "Mogadishu")
+        wall = next(item for item in stage.platforms if item.name == "Fixed12")
+        side_body = pygame.Rect(wall.rect.left - 23, wall.rect.top + 12, 28, 29)
+        side = stage.collision_probe_flags(side_body, wall)
+        self.assertTrue(side.right)
+        self.assertFalse(side.left)
+
+        corner_body = pygame.Rect(wall.rect.left - 23, wall.rect.top - 28, 28, 29)
+        corner = stage.collision_probe_flags(corner_body, wall)
+        self.assertFalse(corner.side)
+        self.assertTrue(corner.right_bottom)
+
+    def test_mogadishu_fixed12_and_fixed13_stop_high_speed_side_tunneling(self) -> None:
+        stage = Stage(self.manifest, "Mogadishu")
+        base = next(item for item in stage.platforms if item.name == "Fixed1")
+        for wall_name in ("Fixed12", "Fixed13"):
+            wall = next(item for item in stage.platforms if item.name == wall_name)
+            for direction in (-1, 1):
+                fighter = self.fighter(stage)
+                start_x = (
+                    wall.rect.left - fighter.body_half_width - 50
+                    if direction > 0
+                    else wall.rect.right + fighter.body_half_width + 50
+                )
+                fighter.pos.update(start_x, base.rect.top)
+                fighter.prev_pos.update(fighter.pos)
+                fighter.xinc = 120.0 * direction
+                fighter.yinc = 0.0
+                fighter.state = "thrown"
+                old_x, old_y = fighter.pos
+
+                fighter._move_with_stage(stage, old_x, old_y)
+
+                expected = (
+                    wall.rect.left - fighter.body_half_width
+                    if direction > 0
+                    else wall.rect.right + fighter.body_half_width
+                )
+                self.assertEqual(fighter.pos.x, expected)
+                self.assertFalse(fighter.body_rect().colliderect(wall.rect))
+
+    def test_mogadishu_foot_only_corner_graze_does_not_become_a_side_wall(self) -> None:
+        stage = Stage(self.manifest, "Mogadishu")
+        wall = next(item for item in stage.platforms if item.name == "Fixed12")
+        fighter = self.fighter(stage)
+        old_x = wall.rect.left - fighter.body_half_width - 5
+        new_x = old_x + 12
+        old_body = fighter.body_rect_at(old_x, wall.rect.top + 1)
+        new_body = fighter.body_rect_at(new_x, wall.rect.top + 1)
+
+        collision = stage.find_side_crossing(
+            old_x,
+            new_x,
+            old_body.top,
+            old_body.bottom,
+            new_body.top,
+            new_body.bottom,
+            fighter.body_half_width,
+        )
+
+        self.assertIsNone(collision)
+
     def test_camera_first_step_matches_zeroed_vcamera_init(self) -> None:
         stage = self.stage()
         fighter = self.fighter(stage)

@@ -1,0 +1,34 @@
+{
+  "scenario": "glorton-peach-purpose-v5",
+  "approved_utc": "2026-07-16T05:23:37Z",
+  "approval": "manual_human_review",
+  "source": "manual_per_level",
+  "levels": {
+    "21": {
+      "qualified": true,
+      "path": "champion_level21_model.zip",
+      "round": 0,
+      "score": 0.0,
+      "manual_approved": true,
+      "source": "foundation_model.zip"
+    },
+    "22": {
+      "qualified": true,
+      "path": "champion_level22_model.zip",
+      "round": 1,
+      "score": 1.6526963,
+      "manual_approved": true,
+      "source": "candidate_level22_model.zip",
+      "sha256": "79dced5dfca84aeef5ef55161b44ba175d7e7650030bcfe7ec0403d07db16997",
+      "evaluation": {
+        "episodes": 40,
+        "wins": 29,
+        "losses": 9,
+        "timeout_wins": 2,
+        "win_rate": 0.725,
+        "decisive_rate": 0.95
+      },
+      "note": "2026-07-16 人工实战认可；冻结为当前正式 22 级。"
+    }
+  }
+}

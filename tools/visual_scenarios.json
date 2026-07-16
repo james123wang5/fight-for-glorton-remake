@@ -1,0 +1,55 @@
+{
+  "schema": "glorton-visual-scenarios-v1",
+  "canonical_seed": 20260714,
+  "tick_ms": 25,
+  "reference_size": [600, 400],
+  "reference_runtime": {
+    "engine": "Ruffle",
+    "note": "The local SWF runner is an emulator baseline. Original AVM1 random() cannot be externally seeded, so frame-exact reference cases avoid random item generation."
+  },
+  "menu_input_script": [
+    {"scene": "preloader", "event": "capture"},
+    {"scene": "preloader", "event": "mouse_click", "x": 306, "y": 232},
+    {"scene": "sponsor_intro", "event": "capture_frames", "frames": [1, 41, 81]},
+    {"scene": "opening", "event": "capture_frames", "frames": [3, 20, 39]},
+    {"scene": "intro", "event": "key_down", "key": "ENTER"},
+    {"scene": "main", "event": "capture"},
+    {"scene": "main", "event": "mouse_click", "x": 302, "y": 272},
+    {"scene": "controls", "event": "capture"},
+    {"scene": "main", "event": "mouse_click", "x": 302, "y": 301},
+    {"scene": "options", "event": "capture"},
+    {"scene": "main", "event": "mouse_click", "x": 302, "y": 243},
+    {"scene": "multi", "event": "mouse_click", "x": 300, "y": 167},
+    {"scene": "player_select", "event": "capture"}
+  ],
+  "battle_setup": {
+    "stage": "Rooftop",
+    "players": [
+      {"fighter": "PeachPlayer", "color": 0},
+      {"fighter": "SBLPlayer", "color": 1}
+    ],
+    "limit_mode": "stock",
+    "limit_value": 5
+  },
+  "attack_inputs": {
+    "punchGround": [{"tick": 0, "player": 0, "buttons": ["punch_pressed"]}],
+    "punchRun": [
+      {"tick": 0, "player": 0, "buttons": ["right"]},
+      {"tick": 1, "player": 0, "buttons": ["right", "punch_pressed"]}
+    ],
+    "punchUp": [{"tick": 0, "player": 0, "buttons": ["up_trace", "punch_pressed"]}],
+    "punchAir": [{"tick": 0, "player": 0, "buttons": ["punch_pressed"]}],
+    "specialGround": [{"tick": 0, "player": 0, "buttons": ["special_pressed"]}],
+    "specialUp": [{"tick": 0, "player": 0, "buttons": ["up_trace", "special_pressed"]}],
+    "specialAir": [{"tick": 0, "player": 0, "buttons": ["special_pressed"]}],
+    "koAttack": []
+  },
+  "damage_input": [{"tick": 0, "player": 1, "buttons": ["punch_pressed"]}],
+  "extreme_state_setups": {
+    "koAttack": {
+      "capture_mode": "source-unreachable-state-injection",
+      "current_attack": "koAttack",
+      "reason": "Fighter.DoCommon exits ko after TimeKo > DamageAmnt, before Fighter.Attack can satisfy TimeKo > 10 * DamageAmnt. The exported timeline exists but is unreachable through normal source inputs."
+    }
+  }
+}

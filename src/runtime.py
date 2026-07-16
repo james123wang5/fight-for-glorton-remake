@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import math
+import os
 import random
+import sys
 import webbrowser
 from collections import OrderedDict
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import pygame
@@ -13,11 +17,22 @@ import pygame
 try:
     from .assets import LazySurfaceMap, LazySurfaceSequence, SURFACE_CACHE
     from .audio import AudioManager
+    from .display import (
+        DisplayMetrics,
+        aligned_aspect_rect,
+        detect_display_metrics,
+        recommended_window_size,
+    )
     from .menu import MainMenu, MatchResults, MenuAction
+    from .mobile_controls import MobileControls
+    from .simulation import BattleSimulation
 except ImportError:
     from assets import LazySurfaceMap, LazySurfaceSequence, SURFACE_CACHE
     from audio import AudioManager
+    from display import DisplayMetrics, aligned_aspect_rect, detect_display_metrics, recommended_window_size
     from menu import MainMenu, MatchResults, MenuAction
+    from mobile_controls import MobileControls
+    from simulation import BattleSimulation
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -52,6 +67,26 @@ class Platform:
     rect: pygame.Rect
     moving: bool
     prev_rect: pygame.Rect | None = None
+
+
+@dataclass(frozen=True)
+class CollisionProbeFlags:
+    """The six source World.CollisionDetect point probes for one platform."""
+
+    left: bool = False
+    right: bool = False
+    left_bottom: bool = False
+    right_bottom: bool = False
+    bottom: bool = False
+    top: bool = False
+
+    @property
+    def side(self) -> bool:
+        return self.left or self.right
+
+    @property
+    def any(self) -> bool:
+        return self.side or self.left_bottom or self.right_bottom or self.bottom or self.top
 
 
 @dataclass
@@ -343,7 +378,11 @@ class StageItem:
         if not self.frames:
             return None
         labels = self.frame_labels or {}
-        label = "active" if self.state == 0 else "airbone" if self.state == 2 else "spawn"
+        # Item clips execute their frame-1 `gotoAndStop("airbone")` action
+        # after the class `init()` call has briefly selected `spawn`. The
+        # settled, unclaimed object therefore uses the airbone artwork too:
+        # the grenade keeps its green grid label and the mine is spiked.
+        label = "active" if self.state == 0 else "airbone"
         frame_no = labels.get(label)
         if frame_no is not None and 1 <= frame_no <= len(self.frames):
             frame = self.frames[frame_no - 1]
@@ -948,8 +987,10 @@ class Stage:
         self,
         old_x: float,
         new_x: float,
-        top: float,
-        bottom: float,
+        old_top: float,
+        old_bottom: float,
+        new_top: float,
+        new_bottom: float,
         half_width: float,
         ignored: Platform | None = None,
         include_moving: bool = True,
@@ -963,16 +1004,41 @@ class Stage:
         for platform in self.platforms:
             if platform is ignored or (platform.moving and not include_moving):
                 continue
-            if bottom <= platform.rect.top + 1 or top >= platform.rect.bottom - 1:
-                continue
             wall_x = platform.rect.left if moving_right else platform.rect.right
-            if min(old_side, new_side) <= wall_x <= max(old_side, new_side):
+            if not min(old_side, new_side) <= wall_x <= max(old_side, new_side):
+                continue
+            travel = new_side - old_side
+            crossing = 0.0 if abs(travel) < 1e-9 else (wall_x - old_side) / travel
+            crossing = max(0.0, min(1.0, crossing))
+            old_mid = (old_top + old_bottom) * 0.5
+            new_mid = (new_top + new_bottom) * 0.5
+            middle_y = old_mid + (new_mid - old_mid) * crossing
+            # The source only marks Left/Right when the corresponding body
+            # midpoint is inside the collision clip. A foot-only corner graze
+            # is handled by the bottom probes and is allowed to slide past.
+            if platform.rect.top <= middle_y < platform.rect.bottom:
                 candidates.append(platform)
         if not candidates:
             return None
         if moving_right:
             return min(candidates, key=lambda item: item.rect.left)
         return max(candidates, key=lambda item: item.rect.right)
+
+    @staticmethod
+    def collision_probe_flags(body: pygame.Rect, platform: Platform) -> CollisionProbeFlags:
+        """Classify a contact using the exact six point roles from World.as."""
+
+        rect = platform.rect
+        middle_y = (body.top + body.bottom) * 0.5
+        middle_x = (body.left + body.right) * 0.5
+        return CollisionProbeFlags(
+            left=rect.collidepoint(body.left, middle_y),
+            right=rect.collidepoint(body.right, middle_y),
+            left_bottom=rect.collidepoint(body.left, body.bottom),
+            right_bottom=rect.collidepoint(body.right, body.bottom),
+            bottom=rect.collidepoint(middle_x, body.bottom),
+            top=rect.collidepoint(middle_x, body.top),
+        )
 
     def projectile_hits_fixed(self, projectile_box: pygame.Rect) -> bool:
         # Projectile.as calls CollisionDetect(this, true, true, false, false):
@@ -1474,10 +1540,13 @@ class PeachFighter:
 
         self.pos.x += self.xinc
         predicted_y = old_y + self.yinc
+        body_before = self.body_rect_at(old_x, old_y)
         body_after_x = self.body_rect_at(self.pos.x, predicted_y)
         side_hit = stage.find_side_crossing(
             old_x,
             self.pos.x,
+            body_before.top,
+            body_before.bottom,
             body_after_x.top,
             body_after_x.bottom,
             self.body_half_width,
@@ -1530,8 +1599,58 @@ class PeachFighter:
             elif self.yinc != 8:
                 self.yinc = self.max_fall
 
+        if side_hit is None:
+            overlap_hit = self._resolve_source_side_overlap(stage, old_x, ignored)
+            if overlap_hit is not None:
+                if self.state == "thrown":
+                    self.xinc *= -1
+                    self.facing *= -1
+                    self.last_collision = "wall-bounce"
+                else:
+                    self.last_collision = "wall"
+
         if self.go_through_platform is not None and not self.body_rect().colliderect(self.go_through_platform.rect):
             self.go_through_platform = None
+
+    def _resolve_source_side_overlap(
+        self,
+        stage: Stage,
+        old_x: float,
+        ignored: Platform | None,
+    ) -> Platform | None:
+        """Push a midpoint side contact out without blocking source corner slides.
+
+        Swept tests handle normal and high-speed entries. This final guard is
+        for a fighter carried or spawned a few pixels into a wall. Requiring a
+        Left/Right midpoint probe preserves the original bottom-corner cases.
+        """
+
+        body = self.body_rect()
+        candidates: list[tuple[float, Platform, float]] = []
+        for platform in stage.platforms:
+            if platform is ignored or not body.colliderect(platform.rect):
+                continue
+            flags = stage.collision_probe_flags(body, platform)
+            if flags.left == flags.right:
+                continue
+            if flags.right:
+                resolved_x = float(platform.rect.left - self.body_half_width)
+            else:
+                resolved_x = float(platform.rect.right + self.body_half_width)
+            # Prefer the side consistent with the last valid center. If both
+            # are possible at a composite corner, take the smallest correction.
+            previous_was_left = old_x <= platform.rect.left - self.body_half_width
+            previous_was_right = old_x >= platform.rect.right + self.body_half_width
+            if previous_was_left:
+                resolved_x = float(platform.rect.left - self.body_half_width)
+            elif previous_was_right:
+                resolved_x = float(platform.rect.right + self.body_half_width)
+            candidates.append((abs(resolved_x - self.pos.x), platform, resolved_x))
+        if not candidates:
+            return None
+        _distance, platform, resolved_x = min(candidates, key=lambda item: item[0])
+        self.pos.x = resolved_x
+        return platform
 
     def _land_on_platform(self, platform: Platform) -> None:
         was_thrown = self.state == "thrown"
@@ -2299,9 +2418,25 @@ class PeachFighter:
             if self.current_attack:
                 self._advance_animation(old_label)
 
-    def finish_intro_spawn(self) -> None:
+    def finish_intro_spawn(self, stage: Stage | None = None) -> None:
         self.has_control = True
         self.spawn_fighter_visible = True
+        # The AVM1 CollisionDetect overlap test lands a fighter that starts a
+        # fraction of a pixel above the platform during the very first GameOn
+        # tick. Our swept crossing otherwise emits one intermediate `falling`
+        # frame, which looks like a shake between GO! and combat.
+        if stage is not None and not self.on_ground and self.yinc >= 0:
+            nearby = [
+                platform
+                for platform in stage.platforms
+                if 0 <= platform.rect.top - self.pos.y <= 1.0
+                and platform.rect.left - self.foot_radius
+                <= self.pos.x
+                <= platform.rect.right + self.foot_radius
+            ]
+            if nearby:
+                self._land_on_platform(min(nearby, key=lambda item: item.rect.top))
+                self.prev_pos.update(self.pos)
         if self.current_attack:
             self.current_label = self.current_attack
         else:
@@ -2572,7 +2707,15 @@ class AIController:
 
 
 class RuntimeApp:
-    def __init__(self) -> None:
+    def __init__(self, random_seed: int = 0) -> None:
+        replay_dir = os.environ.get("GLORTON_HUMAN_REPLAY_DIR", "").strip()
+        self._human_replay_dir = (
+            Path(replay_dir).expanduser().resolve() if replay_dir else None
+        )
+        self._human_recording_active = False
+        self._human_recording_pending_reason = ""
+        self._human_recording_count = 0
+        self.mobile_controls = MobileControls()
         self.manifest = load_manifest()
         self.stage = Stage(self.manifest)
         self.bullets: list[Bullet] = []
@@ -2644,6 +2787,8 @@ class RuntimeApp:
         self._stage_scene_cache_key: tuple[object, ...] | None = None
         self._stage_scene_cache: pygame.Surface | None = None
         self._sky_surface_cache: dict[tuple[int, int], pygame.Surface] = {}
+        self.display_metrics: DisplayMetrics | None = None
+        self._high_output_active = False
         self.death_effects: list[DeathEffect] = []
         self.camera_tricks: list[DeathEffect] = []
         self.camera_shake_start_ms = 0
@@ -2680,7 +2825,8 @@ class RuntimeApp:
         self.countdown_focus_indices: list[int] = []
         self.fighters: list[PeachFighter] = []
         self.player: PeachFighter
-        self._reset_match()
+        self.simulation = BattleSimulation(self, seed=random_seed, tick_ms=TICK_MS)
+        self.simulation.reset()
 
     def _create_inputs(self) -> list[FighterInput]:
         menu = getattr(self, "menu", None)
@@ -2777,67 +2923,79 @@ class RuntimeApp:
         for index, player_input in enumerate(self.inputs):
             if index >= len(self.fighters) or index in self.ai_controllers:
                 continue
-            fighter = self.fighters[index]
-            move = player_input.keydown(key)
-            if move is not None:
-                fighter.move(move)
-            if key in player_input.punch_keys:
-                if player_input.up_trace:
-                    fighter.attack("punch", "up")
-                    player_input.up_trace = False
-                fighter.attack("punch", "none")
-                player_input.pending_punch_pressed = False
-            elif key in player_input.special_keys:
-                if player_input.up_trace:
-                    fighter.attack("special", "up")
-                    player_input.up_trace = False
-                fighter.attack("special", "none")
-                player_input.pending_special_pressed = False
-            elif key in player_input.jump_keys:
-                fighter.jump()
-                player_input.pending_jump_pressed = False
-            elif key in player_input.shield_keys:
-                if fighter.xinc == 0:
-                    fighter.shielded = True
-                player_input.pending_shield_pressed = False
+            # Human events are queued and consumed by BattleSimulation on the
+            # next 25 ms tick.  Desktop, mobile, replay and network input now
+            # share one authoritative path instead of mutating fighters here.
+            player_input.keydown(key)
 
     def _handle_keyup(self, key: int) -> None:
         for index, player_input in enumerate(self.inputs):
             if index >= len(self.fighters) or index in self.ai_controllers:
                 continue
-            fighter = self.fighters[index]
-            move = player_input.keyup(key)
-            if move is not None:
-                fighter.move(move)
-            if key in player_input.up_keys:
-                fighter.jump()
-                player_input.pending_jump_pressed = False
-            elif key in player_input.shield_keys:
-                fighter.shielded = False
-                player_input.pending_shield_released = False
+            player_input.keyup(key)
 
-    def run(self) -> None:
+    async def run_async(self) -> None:
+        """Run on desktop or yield once per frame to the browser event loop."""
+
         pygame.init()
-        self.audio = AudioManager(ROOT)
-        screen = pygame.display.set_mode(WINDOW_SIZE, pygame.RESIZABLE)
+        browser_mode = sys.platform == "emscripten"
+        # Mobile Safari only permits audio after a user gesture. Desktop keeps
+        # its original eager audio path; the web build initializes on the first
+        # touch/click/key event instead.
+        self.audio = None if browser_mode else AudioManager(ROOT)
+        screen = pygame.display.set_mode(recommended_window_size(WINDOW_SIZE), pygame.RESIZABLE)
+        self.display_metrics = detect_display_metrics(screen)
         pygame.display.set_caption("The Fight for Glorton")
         self.menu = MainMenu(ROOT, self.manifest)
         self.results = MatchResults(ROOT, self.manifest)
-        self.audio.set_muted(not self.menu.sound_on)
+        if self.audio is not None:
+            self.audio.set_muted(not self.menu.sound_on)
         last_sound_on = self.menu.sound_on
         clock = pygame.time.Clock()
         font = pygame.font.SysFont("menlo", 14)
         running = True
         while running:
             elapsed = clock.tick(60)
-            if last_sound_on and not self.menu.sound_on:
+            if self.audio is not None and last_sound_on and not self.menu.sound_on:
                 self.audio.stop_all()
                 self.menu_music_started = False
-            self.audio.set_muted(not self.menu.sound_on)
+            if self.audio is not None:
+                self.audio.set_muted(not self.menu.sound_on)
             last_sound_on = self.menu.sound_on
             for event in pygame.event.get():
+                if (
+                    browser_mode
+                    and self.audio is None
+                    and event.type
+                    in {
+                        pygame.KEYDOWN,
+                        pygame.MOUSEBUTTONDOWN,
+                        pygame.FINGERDOWN,
+                    }
+                ):
+                    self.audio = AudioManager(ROOT)
+                    self.audio.set_muted(not self.menu.sound_on)
                 if event.type == pygame.QUIT:
                     running = False
+                    continue
+                if self.mobile_controls.enabled and event.type in {
+                    pygame.FINGERDOWN,
+                    pygame.FINGERMOTION,
+                    pygame.FINGERUP,
+                }:
+                    if self.app_state == "battle":
+                        was_paused = self.paused
+                        self.mobile_controls.handle_battle_event(event, screen.get_size())
+                        if self.mobile_controls.take_pause_toggle():
+                            if self.match_state in {"loading", "countdown", "playing"}:
+                                self.paused = not self.paused
+                                self.mobile_controls.reset()
+                        elif was_paused:
+                            self.mobile_controls.post_mouse_event(event, screen.get_size())
+                        continue
+                    self.mobile_controls.post_mouse_event(event, screen.get_size())
+                    continue
+                if self.mobile_controls.ignore_synthetic_mouse(event):
                     continue
                 if self.app_state == "menu":
                     action = self.menu.handle_event(event, screen.get_size())
@@ -2873,7 +3031,9 @@ class RuntimeApp:
                     elif event.key == pygame.K_F1:
                         self.show_debug = not self.show_debug
                     elif event.key == pygame.K_r:
-                        self._reset_match()
+                        self._finish_human_recording("manual_reset")
+                        self.simulation.reset()
+                        self._maybe_start_human_recording()
                     elif self.match_state not in {"loading", "countdown", "playing"}:
                         continue
                     else:
@@ -2894,17 +3054,25 @@ class RuntimeApp:
                 self.results.update(elapsed)
                 self.results.draw(screen)
             else:
-                self._advance_battle_time(elapsed)
+                if not self.paused and self.match_state in {"loading", "countdown", "playing"}:
+                    self.accumulator += max(0, elapsed)
                 keys = pygame.key.get_pressed()
                 while not self.paused and self.accumulator >= TICK_MS:
                     self.stage.set_time(self.stage_time_ms)
                     if self.match_state in {"loading", "countdown", "playing"}:
                         controls = [player_input.controls(keys) for player_input in self.inputs]
-                        if self.match_state in {"loading", "countdown"}:
-                            self._fixed_tick_countdown(controls)
-                        else:
-                            self._fixed_tick_match(controls)
+                        mobile_player = next(
+                            (
+                                index
+                                for index in range(min(len(controls), len(self.fighters)))
+                                if index not in self.ai_controllers
+                            ),
+                            None,
+                        )
+                        self.mobile_controls.merge_into(controls, mobile_player)
+                        self.simulation.step(controls, advance_clock=True)
                     self.accumulator -= TICK_MS
+                self._flush_human_recording()
                 if self.match_state == "game_set" and not self.game_set_audio_played:
                     self._play_game_set_audio()
                 if self.match_state == "game_set" and not self.paused:
@@ -2923,19 +3091,31 @@ class RuntimeApp:
                 if self.app_state == "results":
                     self.results.draw(screen)
                 else:
-                    self._draw(screen, font)
+                    self._draw_output(screen, font)
                     if self.paused:
                         self._draw_pause_overlay(screen)
+                    if self.match_state in {"countdown", "playing"} or self.paused:
+                        self.mobile_controls.draw(screen, paused=self.paused)
             pygame.display.flip()
-        self.audio.stop_all()
-        pygame.quit()
+            await asyncio.sleep(0)
+        self._finish_human_recording("window_closed")
+        if self.audio is not None:
+            self.audio.stop_all()
+        if not browser_mode:
+            pygame.quit()
+
+    def run(self) -> None:
+        asyncio.run(self.run_async())
 
     def _handle_menu_action(self, action: MenuAction) -> bool:
         if action.kind == "quit":
+            self._finish_human_recording("quit")
             return False
         if action.kind == "return_main":
+            self._finish_human_recording("return_main")
             self.app_state = "menu"
             self.paused = False
+            self.mobile_controls.reset()
             self.accumulator = 0
             self.menu.return_to_main()
             if self.audio is not None:
@@ -2959,9 +3139,12 @@ class RuntimeApp:
         self.stage = Stage(self.manifest, selected_stage)
         self.app_state = "battle"
         self.paused = False
+        self.mobile_controls.reset()
         self.match_end_elapsed_ms = 0
         self.accumulator = 0
-        self._reset_match()
+        self._finish_human_recording("new_match")
+        self.simulation.reset()
+        self._maybe_start_human_recording()
         if self.audio is not None:
             self.audio.stop_all()
             self.menu_music_started = False
@@ -2971,6 +3154,65 @@ class RuntimeApp:
             elif selected_stage == "B52":
                 self.audio.play_loop("jet_engine", "ambience")
         return True
+
+    def _maybe_start_human_recording(self) -> bool:
+        if self._human_replay_dir is None or self._human_recording_active:
+            return False
+        players = [
+            dict(item)
+            for item in self.match_config.get("players", [])
+            if item.get("enabled", True) and item.get("fighter")
+        ]
+        human_slots = [index for index, item in enumerate(players) if not item.get("computer")]
+        ai_slots = [index for index, item in enumerate(players) if item.get("computer")]
+        if not human_slots or not ai_slots:
+            return False
+        self._human_replay_dir.mkdir(parents=True, exist_ok=True)
+        self.simulation.start_recording(
+            {
+                "kind": "human_vs_ai",
+                "human_slots": human_slots,
+                "ai_slots": ai_slots,
+                "ai_levels": {
+                    str(index): int(players[index].get("level", 7)) for index in ai_slots
+                },
+                "fighter_names": [str(item.get("fighter", "")) for item in players],
+                "stage": self.stage.name,
+                "training_source": True,
+            }
+        )
+        self._human_recording_active = True
+        self._human_recording_pending_reason = ""
+        print(f"真人训练录像已开始: {self.stage.name} / AI {','.join(str(players[i].get('level', 7)) for i in ai_slots)}级")
+        return True
+
+    def _flush_human_recording(self) -> Path | None:
+        if not self._human_recording_pending_reason:
+            return None
+        reason = self._human_recording_pending_reason
+        self._human_recording_pending_reason = ""
+        return self._finish_human_recording(reason)
+
+    def _finish_human_recording(self, reason: str) -> Path | None:
+        if not self._human_recording_active or self._human_replay_dir is None:
+            return None
+        self._human_recording_active = False
+        self._human_recording_pending_reason = ""
+        recording = self.simulation.stop_recording()
+        metadata = recording.setdefault("metadata", {})
+        metadata["end_reason"] = str(reason)
+        metadata["winner"] = (
+            self.match_winner.name if self.match_winner is not None else None
+        )
+        metadata["game_time_seconds"] = int(self.game_time_seconds)
+        self._human_recording_count += 1
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        path = self._human_replay_dir / (
+            f"human_vs_ai_{stamp}_{self._human_recording_count:03d}.json"
+        )
+        BattleSimulation.save_recording(recording, path)
+        print(f"真人训练录像已保存: {path}")
+        return path
 
     def _sync_menu_music(self) -> None:
         if self.audio is None or self.app_state != "menu" or not self.menu.sound_on:
@@ -3037,9 +3279,8 @@ class RuntimeApp:
                 fighter.lives = 1
             self.fighters.append(fighter)
             if bool(config.get("computer", False)):
-                self.ai_controllers[index] = AIController(
+                self.ai_controllers[index] = self._create_ai_controller(
                     fighter,
-                    self.stage,
                     int(config.get("level", 7)),
                     force_victim=bool(config.get("endurance", False)),
                 )
@@ -3098,21 +3339,171 @@ class RuntimeApp:
         self._stage_scene_cache_key = None
         self._stage_scene_cache = None
 
-    def _fixed_tick_countdown(self, player_controls: list[dict[str, bool]] | None = None) -> None:
-        controls_by_player = player_controls or [{} for _ in self.fighters]
-        source_computers = list(self.ai_controllers.values())
-        for index, fighter in enumerate(self.fighters):
-            controls = (
-                controls_by_player[index]
-                if index < len(controls_by_player) and index not in self.ai_controllers
-                else {}
+    def _create_ai_controller(
+        self,
+        fighter: PeachFighter,
+        level: int,
+        *,
+        force_victim: bool = False,
+    ) -> object:
+        model22_path = os.environ.get("GLORTON_AI22_MODEL", "")
+        model_path = os.environ.get("GLORTON_AI21_MODEL", "")
+        web_v5_path = ""
+        if os.environ.get("GLORTON_AI_V5_WEB") == "1" and not force_victim:
+            if level == 22 and model22_path:
+                web_v5_path = model22_path
+            elif level == 21 and model_path:
+                web_v5_path = model_path
+        if web_v5_path:
+            try:
+                from .v5_web_deployment import WebV5AIController
+            except ImportError:
+                from v5_web_deployment import WebV5AIController
+            return WebV5AIController(
+                self,
+                fighter,
+                self.stage,
+                web_v5_path,
+                level=level,
             )
-            fighter.advance_pre_game_tick(controls)
-            fighter.advance_intro_tick()
-            if index < len(source_computers):
-                source_computers[index].fixed_tick(self.fighters)
-        if self.match_state == "countdown":
-            self._step_camera()
+        v5_model_path = ""
+        if os.environ.get("GLORTON_AI_V5") == "1" and not force_victim:
+            if level == 22 and model22_path:
+                v5_model_path = model22_path
+            elif level == 21 and model_path:
+                v5_model_path = model_path
+        if v5_model_path:
+            try:
+                from training.v5_deployment import V5TrainedAIController
+            except ImportError as exc:
+                raise RuntimeError(
+                    f"{level}级v5目的驱动AI加载失败。请用 "
+                    ".venv-train/bin/python -m training.play_v5 启动。"
+                ) from exc
+            if fighter.fighter_name != "PeachPlayer" or self.stage.name != "Mogadishu":
+                print(
+                    f"提示: {level}级v5模型只训练过 Peach vs Peach / Mogadishu；"
+                    f"当前是 {fighter.fighter_name} / {self.stage.name}，表现不代表真实强度。"
+                )
+            return V5TrainedAIController(
+                self,
+                fighter,
+                self.stage,
+                v5_model_path,
+                level=level,
+            )
+        v4_model_path = ""
+        if os.environ.get("GLORTON_AI_V4") == "1" and not force_victim:
+            if level == 22 and model22_path:
+                v4_model_path = model22_path
+            elif level == 21 and model_path:
+                v4_model_path = model_path
+        if v4_model_path:
+            try:
+                from training.v4_deployment import V4TrainedAIController
+            except ImportError as exc:
+                raise RuntimeError(
+                    f"{level}级v4主动战斗AI加载失败。请用 "
+                    ".venv-train/bin/python -m training.play_v4 启动。"
+                ) from exc
+            if fighter.fighter_name != "PeachPlayer" or self.stage.name != "Mogadishu":
+                print(
+                    f"提示: {level}级v4模型只训练过 Peach vs Peach / Mogadishu；"
+                    f"当前是 {fighter.fighter_name} / {self.stage.name}，表现不代表真实强度。"
+                )
+            return V4TrainedAIController(
+                self,
+                fighter,
+                self.stage,
+                v4_model_path,
+                level=level,
+            )
+        tactical_model_path = ""
+        if os.environ.get("GLORTON_AI_TACTICAL") == "1" and not force_victim:
+            if level == 22 and model22_path:
+                tactical_model_path = model22_path
+            elif level == 21 and model_path:
+                tactical_model_path = model_path
+        if tactical_model_path:
+            try:
+                from training.tactical_deployment import TacticalTrainedAIController
+            except ImportError as exc:
+                raise RuntimeError(
+                    f"{level}级v3战术AI加载失败。请用 "
+                    ".venv-train/bin/python -m training.play_tactical 启动。"
+                ) from exc
+            if fighter.fighter_name != "PeachPlayer" or self.stage.name != "Mogadishu":
+                print(
+                    f"提示: {level}级v3模型只训练过 Peach vs Peach / Mogadishu；"
+                    f"当前是 {fighter.fighter_name} / {self.stage.name}，表现不代表真实强度。"
+                )
+            return TacticalTrainedAIController(
+                self,
+                fighter,
+                self.stage,
+                tactical_model_path,
+                level=level,
+            )
+        league_model_path = ""
+        if level == 22 and model22_path and not force_victim:
+            league_model_path = model22_path
+        elif (
+            level == 21
+            and model_path
+            and os.environ.get("GLORTON_AI21_HUMANIZED") == "1"
+            and not force_victim
+        ):
+            league_model_path = model_path
+        if league_model_path:
+            try:
+                from training.league_deployment import LeagueTrainedAIController
+            except ImportError as exc:
+                raise RuntimeError(
+                    f"{level}级联赛AI加载失败。请用 "
+                    ".venv-train/bin/python -m training.play_league 启动。"
+                ) from exc
+            if fighter.fighter_name != "PeachPlayer" or self.stage.name != "Mogadishu":
+                print(
+                    f"提示: {level}级联赛模型只训练过 Peach vs Peach / Mogadishu；"
+                    f"当前是 {fighter.fighter_name} / {self.stage.name}，表现不代表真实强度。"
+                )
+            return LeagueTrainedAIController(
+                self,
+                fighter,
+                self.stage,
+                league_model_path,
+                level=level,
+            )
+        if level == 21 and model_path and not force_victim:
+            try:
+                from training.deployment import TrainedAIController
+            except ImportError as exc:
+                raise RuntimeError(
+                    "21级AI加载失败。请用 .venv-train/bin/python -m training.play_level21 启动。"
+                ) from exc
+            if fighter.fighter_name != "PeachPlayer" or self.stage.name != "Mogadishu":
+                print(
+                    "提示: 21级模型只训练过 Peach vs Peach / Mogadishu；"
+                    f"当前是 {fighter.fighter_name} / {self.stage.name}，表现不代表真实强度。"
+                )
+            return TrainedAIController(
+                self,
+                fighter,
+                self.stage,
+                model_path,
+            )
+        # Level 21 is an opt-in trained model.  Without its launcher, retain
+        # the original menu/runtime contract of source-style levels 1--20.
+        return AIController(
+            fighter,
+            self.stage,
+            min(20, max(1, level)),
+            force_victim=force_victim,
+        )
+
+    def _fixed_tick_countdown(self, player_controls: list[dict[str, bool]] | None = None) -> None:
+        controls = BattleSimulation.normalize_inputs(player_controls, len(self.fighters))
+        self.simulation._fixed_tick_countdown(controls)
 
     def _start_match_countdown(self) -> None:
         self.match_state = "countdown"
@@ -3197,7 +3588,7 @@ class RuntimeApp:
             for fighter in self.fighters:
                 fighter.intro_visible = True
                 if not fighter.dead:
-                    fighter.finish_intro_spawn()
+                    fighter.finish_intro_spawn(getattr(self, "stage", None))
 
     def _show_intro_player(self, index: int) -> None:
         if index < 0 or index >= len(self.fighters):
@@ -3214,55 +3605,8 @@ class RuntimeApp:
         return
 
     def _fixed_tick_match(self, player_controls: list[dict[str, bool]]) -> None:
-        self._fixed_tick_items()
-        # DoMain indexes the dense Computers[] array with the fighter-loop
-        # index. With P1 human, Computers[0] (P2) therefore acts after P1 and
-        # before P2 is simulated, rather than after its own fighter tick.
-        source_computers = list(self.ai_controllers.values())
-        for index, fighter in enumerate(self.fighters):
-            controls = (
-                player_controls[index]
-                if index < len(player_controls) and index not in self.ai_controllers
-                else {}
-            )
-            fighter.fixed_tick(
-                self.stage,
-                controls,
-                self.bullets,
-                self.rockets,
-                self.special_projectiles,
-            )
-            if fighter.pending_stage_boom:
-                self._start_explosion(fighter.pos, None, 4)
-                fighter.pending_stage_boom = False
-            self._collect_fighter_sounds(fighter)
-            self._collect_puffs(fighter)
-            self._collect_death_event(fighter)
-            if fighter.resolve_attack_this_tick:
-                self._resolve_melee_hits(fighter)
-            fighter.finish_post_collision_tick()
-            if index < len(source_computers):
-                source_computers[index].fixed_tick(self.fighters)
-        for bullet in self.bullets:
-            bullet.fixed_tick(self.stage)
-        for rocket in self.rockets:
-            rocket.fixed_tick(self.stage)
-        for projectile in self.special_projectiles:
-            projectile.fixed_tick(self.stage)
-        self._resolve_bullet_hits()
-        self._resolve_rocket_hits()
-        self._resolve_special_projectile_hits()
-        self.bullets = [bullet for bullet in self.bullets if bullet.alive]
-        self.rockets = [rocket for rocket in self.rockets if rocket.alive]
-        self.special_projectiles = [projectile for projectile in self.special_projectiles if projectile.alive]
-        self._resolve_item_collisions()
-        self._tick_explosions()
-        for fighter in self.fighters:
-            self._collect_fighter_sound_stops(fighter)
-        self._tick_death_effects()
-        self._tick_spawn_effects()
-        self._update_match_state()
-        self._step_camera()
+        controls = BattleSimulation.normalize_inputs(player_controls, len(self.fighters))
+        self.simulation._fixed_tick_match(controls)
 
     def _fixed_tick_items(self) -> None:
         self.item_gen_timer_ms += TICK_MS
@@ -3488,8 +3832,10 @@ class RuntimeApp:
         self.match_end_elapsed_ms = 0
         self.game_set_audio_played = False
         self.accumulator = 0
+        if getattr(self, "_human_recording_active", False):
+            self._human_recording_pending_reason = "game_set"
 
-    def _advance_battle_time(self, elapsed_ms: int) -> None:
+    def _advance_battle_time(self, elapsed_ms: int, *, accumulate: bool = True) -> None:
         elapsed_ms = max(0, elapsed_ms)
         if self.match_state == "loading":
             self.match_loading_elapsed_ms += elapsed_ms
@@ -3499,7 +3845,8 @@ class RuntimeApp:
         if self.paused:
             return
         self.stage_time_ms += elapsed_ms
-        self.accumulator += elapsed_ms
+        if accumulate:
+            self.accumulator += elapsed_ms
 
     def _pre_end_duration_ms(self) -> float:
         data = self.manifest.get("results", {})
@@ -3882,7 +4229,15 @@ class RuntimeApp:
         quality = getattr(getattr(self, "menu", None), "quality", "MEDIUM")
         if quality == "LOW":
             return pygame.transform.scale(surface, size)
-        return pygame.transform.smoothscale(surface, size)
+        if quality != "HIGH" or self._high_output_active:
+            return pygame.transform.smoothscale(surface, size)
+        ratio = max(2, round(getattr(self.display_metrics, "pixel_ratio", 1.0)))
+        intermediate_size = (
+            max(1, int(size[0]) * ratio),
+            max(1, int(size[1]) * ratio),
+        )
+        intermediate = pygame.transform.smoothscale(surface, intermediate_size)
+        return pygame.transform.smoothscale(intermediate, size)
 
     def _draw_sky_backdrop(self, screen: pygame.Surface, viewport: pygame.Rect) -> None:
         if viewport.w <= 0 or viewport.h <= 0:
@@ -4218,10 +4573,27 @@ class RuntimeApp:
         self._stage_scene_cache = scene
         return scene
 
+    def _draw_output(self, screen: pygame.Surface, font: pygame.font.Font) -> None:
+        quality = getattr(getattr(self, "menu", None), "quality", "MEDIUM")
+        if quality != "HIGH":
+            self._draw(screen, font)
+            return
+        ratio = max(2, round(getattr(self.display_metrics, "pixel_ratio", 1.0)))
+        render_size = (screen.get_width() * ratio, screen.get_height() * ratio)
+        high_surface = pygame.Surface(render_size).convert()
+        high_font = pygame.font.SysFont("menlo", max(1, 14 * ratio))
+        self._high_output_active = True
+        try:
+            self._draw(high_surface, high_font)
+        finally:
+            self._high_output_active = False
+        screen.blit(pygame.transform.smoothscale(high_surface, screen.get_size()), (0, 0))
+
     def _draw(self, screen: pygame.Surface, font: pygame.font.Font) -> None:
         w, h = screen.get_size()
         panel_x = max(0, w - PANEL_WIDTH) if self.show_debug else w
-        viewport = MainMenu._screen_rect((panel_x, h))
+        pixel_ratio = 1.0 if self._high_output_active else getattr(self.display_metrics, "pixel_ratio", 1.0)
+        viewport = aligned_aspect_rect((panel_x, h), pixel_ratio=pixel_ratio)
         alpha = self._render_alpha()
         cam, zoom = self._camera(viewport, alpha)
 
@@ -4336,6 +4708,12 @@ class RuntimeApp:
 
         pygame.draw.rect(screen, (32, 35, 42), (panel_x, 0, PANEL_WIDTH, h))
         winner = self.match_winner.name if self.match_winner is not None else "-"
+        metrics = self.display_metrics
+        display_line = (
+            f"Display: {metrics.pixel_ratio:.2f}x {metrics.source}"
+            if metrics is not None
+            else "Display: undetected"
+        )
         lines = [
             "Playable Runtime",
             "P1 A/D move  W jump",
@@ -4349,6 +4727,9 @@ class RuntimeApp:
             f"Match: {self.match_state}",
             f"Winner: {winner}",
             f"Tick: {TICK_MS} ms",
+            f"Sim tick: {self.simulation.tick_index}",
+            display_line,
+            f"Quality: {getattr(getattr(self, 'menu', None), 'quality', 'MEDIUM')}",
             f"State: {self.player.state}",
             f"Frame: {self.player.current_label}",
             f"Anim: {self.player.animation_frame}",
@@ -4985,12 +5366,19 @@ class RuntimeApp:
         if cached is not None:
             return cached
         if name.lower() in {"futura md bt", "futura lt bt"}:
-            embedded_path = ROOT / "assets/fonts/2_Futura Md BT.ttf"
+            native_futura = Path("/System/Library/Fonts/Supplemental/Futura.ttc")
+            embedded_path = (
+                native_futura
+                if native_futura.is_file()
+                else ROOT / "assets/fonts/2_Futura Md BT.ttf"
+            )
         else:
             embedded_path = None
         if embedded_path is not None and embedded_path.is_file():
             cached = pygame.font.Font(str(embedded_path), key[1])
-            cached.set_bold(key[2])
+            # Font 2 is already the embedded bold Futura outline. Calling
+            # set_bold(True) fabricates a second outline and makes FarIndicator
+            # P1/P2 visibly heavier than the source SWF.
         else:
             path = pygame.font.match_font(name, bold=bold)
             cached = pygame.font.Font(path, key[1]) if path else pygame.font.SysFont(name, key[1], bold=bold)

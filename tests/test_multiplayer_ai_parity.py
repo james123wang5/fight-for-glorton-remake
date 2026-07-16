@@ -105,6 +105,28 @@ class MultiplayerAIParityTests(unittest.TestCase):
         self.assertEqual(fighter._timeline_frame("spawn"), 5)
         self.assertGreater(fighter.current_image().get_bounding_rect().w, 1)
 
+    def test_fight_frame_item_timer_already_runs_during_countdown(self) -> None:
+        runtime = RuntimeApp()
+        runtime.item_gen_timer_ms = 1975
+        with (
+            patch("src.runtime.random.randrange", return_value=0),
+            patch.object(runtime.stage, "item_spawn_point", return_value=pygame.Vector2(300, 100)),
+        ):
+            runtime._fixed_tick_countdown([{}, {}])
+        self.assertEqual([item.kind for item in runtime.items], ["Mine"])
+
+    def test_go_to_combat_settles_source_half_pixel_spawn_without_falling_frame(self) -> None:
+        runtime = self.runtime
+        runtime._reset_match()
+        self.assertTrue(all(not fighter.on_ground for fighter in runtime.fighters))
+        runtime.ready_set = -1
+        runtime._apply_ready_step()
+        self.assertEqual(runtime.match_state, "playing")
+        for fighter in runtime.fighters:
+            self.assertTrue(fighter.on_ground)
+            self.assertEqual(fighter.current_label, "still")
+            self.assertEqual(fighter.pos.y, fighter.ground_platform.rect.top)
+
     def test_pregame_keycombi_updates_commands_but_gameon_freezes_physics(self) -> None:
         runtime = self.runtime
         runtime.match_config = {
@@ -123,8 +145,15 @@ class MultiplayerAIParityTests(unittest.TestCase):
         runtime._handle_keydown(next(iter(runtime.inputs[0].right_keys)))
         runtime._handle_keydown(next(iter(runtime.inputs[0].punch_keys)))
         self.assertTrue(fighter.has_control)
+        # Desktop events are queued until the same authoritative 25 ms step
+        # used by replay/mobile/network, rather than mutating the fighter in
+        # the SDL event callback.
+        self.assertEqual((fighter.state, fighter.xinc), ("stop", 0.0))
+        controls = [item.controls(pygame.key.get_pressed()) for item in runtime.inputs]
+        runtime.simulation.step_fast(controls, advance_clock=False)
         self.assertEqual((fighter.state, fighter.xinc), ("goright", fighter.move_xinc))
         self.assertEqual(fighter.current_attack, "punchAir")
+        self.assertEqual(fighter.pos, start)
 
         animation_time = fighter.animation_time_ms
         runtime._fixed_tick_countdown([{}, {}])
@@ -164,6 +193,32 @@ class MultiplayerAIParityTests(unittest.TestCase):
             controller.fixed_tick(runtime.fighters)
         self.assertEqual(controller.action_delay_ms, 25)
         self.assertEqual(controller.queued_action, ("punch", "none"))
+
+    def test_level20_mobile_match_keeps_advancing_and_cpu_acts(self) -> None:
+        runtime = self.runtime
+        runtime.match_config = {
+            "type": "vsmode",
+            "selected_stage": "Mogadishu",
+            "players": [
+                {"fighter": "PeachPlayer", "color": 0, "computer": False, "enabled": True, "level": 7},
+                {"fighter": "PeachPlayer", "color": 1, "computer": True, "enabled": True, "level": 20},
+            ],
+            "limit_mode": "stock",
+            "limit_value": 3,
+        }
+        runtime.stage = type(runtime.stage)(runtime.manifest, "Mogadishu")
+        runtime._reset_match()
+        runtime.ready_set = -1
+        runtime._apply_ready_step()
+        cpu = runtime.fighters[1]
+        start = pygame.Vector2(cpu.pos)
+        for _ in range(400):
+            runtime.simulation.step_fast([{}, {}])
+        controller = runtime.ai_controllers[1]
+        self.assertEqual(controller.level, 20)
+        self.assertEqual(runtime.simulation.tick_index, 400)
+        self.assertGreater(runtime.stage_time_ms, 0)
+        self.assertTrue(cpu.pos != start or cpu.current_attack or cpu.damage_amnt > 0)
 
     def test_dense_source_computer_array_runs_cpu_before_its_fighter_tick(self) -> None:
         runtime = self.configure_four()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -15,7 +16,7 @@ except ImportError:
 
 
 REFERENCE_SIZE = (600, 400)
-EXPORT_SCALE = 4
+EXPORT_SCALE = max(1, min(4, int(os.environ.get("GLORTON_ASSET_SCALE", "4"))))
 CANVAS_SIZE = (REFERENCE_SIZE[0] * EXPORT_SCALE, REFERENCE_SIZE[1] * EXPORT_SCALE)
 
 
@@ -92,6 +93,17 @@ class MainMenu:
         ("DefaultPlayer", 560),
         ("AuberginePlayer", 10),
     )
+    # FFDec crops each exported Pose PNG around a different internal origin.
+    # These (x, y, horizontal-scale) values are registered against the
+    # Ruffle-rendered frame rather than the cropped PNG canvas.
+    FIGHTER_POSE_LAYOUT = {
+        "SBLPlayer": (1.6, 11.0, 1.0),
+        "PeachPlayer": (7.895071358, 16.001742514, 1.0),
+        "TrashPlayer": (14.520529085, 6.471179085, 1.0),
+        "CoffeePlayer": (10.190180955, 8.273095735, 1.0),
+        "DefaultPlayer": (8.95, 25.95, 1.0),
+        "AuberginePlayer": (3.8, 1.25, 0.99),
+    }
     STAGES = (
         ("Rooftop", 713, (30.0, 90.0)),
         ("Mogadishu", 830, (30.0 + 550.0 / 3.0, 90.0)),
@@ -128,7 +140,10 @@ class MainMenu:
 
     def __init__(self, root: Path, manifest: dict | None = None) -> None:
         self.root = root
-        self.futura_font_path = root / "assets/fonts/2_Futura Md BT.ttf"
+        native_futura = Path("/System/Library/Fonts/Supplemental/Futura.ttc")
+        self.futura_font_path = (
+            native_futura if native_futura.is_file() else root / "assets/fonts/2_Futura Md BT.ttf"
+        )
         self._font_cache: dict[tuple[int, bool], pygame.font.Font] = {}
         self.frame_root = root / "assets/menu/main_frames"
         self.sprite_root = root / "assets/menu/sprites"
@@ -153,7 +168,18 @@ class MainMenu:
         self.limit_picker_background = pygame.image.load(
             str(root / "assets/menu/shapes/1020.png")
         ).convert_alpha()
-        self.fighter_poses = {name: self._load_sprite(symbol_id) for name, symbol_id in self.FIGHTERS}
+        self.fighter_poses: dict[str, tuple[pygame.Surface, pygame.Vector2, float]] = {}
+        for name, symbol_id in self.FIGHTERS:
+            pose = self._load_sprite(symbol_id)
+            alpha_bounds = pose.get_bounding_rect(min_alpha=1)
+            if alpha_bounds.w > 0 and alpha_bounds.h > 0:
+                pose = pose.subsurface(alpha_bounds).copy()
+            offset_x, offset_y, scale_x = self.FIGHTER_POSE_LAYOUT[name]
+            self.fighter_poses[name] = (
+                pose,
+                pygame.Vector2(offset_x, offset_y),
+                scale_x,
+            )
         self.manifest = manifest or json.loads(
             (root / "assets/manifests/glorton_manifest.json").read_text(encoding="utf-8")
         )
@@ -265,6 +291,7 @@ class MainMenu:
         self.coin_targets: list[pygame.Vector2 | None] = []
         self.dragging_player: int | None = None
         self.pressed_button: int | None = None
+        self.hover_description = ""
         self.drag_pos = pygame.Vector2()
         self.quality = "MEDIUM"
         self.sound_on = True
@@ -652,13 +679,21 @@ class MainMenu:
                             self.player_levels[index] = max(minimum, self.player_levels[index] - 1)
                             return None
                         if self._player_local_rect("increment").move(origin).collidepoint(ref_pos):
-                            maximum = int(self.player_select_data.get("ai_level_max", 20))
+                            maximum = self._maximum_ai_level()
                             self.player_levels[index] = min(maximum, self.player_levels[index] + 1)
                             return None
                     if self._player_local_rect("toggle").move(origin).collidepoint(ref_pos):
                         self._toggle_player(index)
                         return None
         return None
+
+    def _maximum_ai_level(self) -> int:
+        source_maximum = int(self.player_select_data.get("ai_level_max", 20))
+        if os.environ.get("GLORTON_AI22_MODEL"):
+            return max(22, source_maximum)
+        if os.environ.get("GLORTON_AI21_MODEL"):
+            return max(21, source_maximum)
+        return source_maximum
 
     def _adjust_limit(self, direction: int) -> None:
         if self.limit_mode == "stock":
@@ -819,6 +854,18 @@ class MainMenu:
                     round(float(position["y"]) * EXPORT_SCALE),
                 ),
             )
+            # These three linked lines are a DefineEditText on the SWF root
+            # (character 914), not part of the exported preloader sprite.
+            # Recreate them explicitly so the ready frame matches the source.
+            self._draw_center_text(
+                canvas, "locklegion.com", 300.0, 286.0, 25, (255, 255, 255), bold=True
+            )
+            self._draw_center_text(
+                canvas, "in association with", 300.0, 313.0, 16, (255, 255, 255), bold=True
+            )
+            self._draw_center_text(
+                canvas, "armorgames.com", 300.0, 339.0, 25, (255, 255, 255), bold=True
+            )
             return canvas
         if self.scene == "opening":
             return self._frame(self.opening_frame).copy()
@@ -835,37 +882,41 @@ class MainMenu:
         canvas: pygame.Surface,
         mouse_ref: tuple[float, float] | None,
     ) -> None:
-        if mouse_ref is None:
-            return
-        for button in self.BUTTONS[self.scene]:
-            if not self._button_rect(button).collidepoint(mouse_ref):
-                continue
-            image = self.buttons[button.symbol_id].copy()
-            image.fill((255, 204, 0, 255), special_flags=pygame.BLEND_RGBA_MULT)
-            offset_x, offset_y = self.button_hover_offsets.get(button.symbol_id, (0, 0))
-            down_shift = EXPORT_SCALE if self.pressed_button == button.symbol_id else 0
-            up_position = (
-                round(button.center[0] * EXPORT_SCALE - image.get_width() / 2 + offset_x),
-                round(button.center[1] * EXPORT_SCALE - image.get_height() / 2 + offset_y),
-            )
-            # DefineButton2 replaces its Up record with the Over/Down record.
-            # Restore the exact root texture first so antialiased white Up
-            # pixels do not remain underneath the yellow glyph.
-            canvas.blit(
-                self.menu_background,
-                up_position,
-                pygame.Rect(up_position, image.get_size()),
-            )
-            canvas.blit(
-                image,
-                (
-                    up_position[0] + down_shift,
-                    up_position[1] + down_shift,
-                ),
-            )
-            description = self.HOVER_TEXT.get(button.symbol_id)
-            if description:
-                self._draw_text(canvas, description, 19, 353, 12, (255, 255, 255))
+        if mouse_ref is not None:
+            for button in self.BUTTONS[self.scene]:
+                if not self._button_rect(button).collidepoint(mouse_ref):
+                    continue
+                image = self.buttons[button.symbol_id].copy()
+                image.fill((255, 204, 0, 255), special_flags=pygame.BLEND_RGBA_MULT)
+                offset_x, offset_y = self.button_hover_offsets.get(button.symbol_id, (0, 0))
+                down_shift = EXPORT_SCALE if self.pressed_button == button.symbol_id else 0
+                up_position = (
+                    round(button.center[0] * EXPORT_SCALE - image.get_width() / 2 + offset_x),
+                    round(button.center[1] * EXPORT_SCALE - image.get_height() / 2 + offset_y),
+                )
+                # DefineButton2 replaces its Up record with the Over/Down record.
+                # Restore the exact root texture first so antialiased white Up
+                # pixels do not remain underneath the yellow glyph.
+                canvas.blit(
+                    self.menu_background,
+                    up_position,
+                    pygame.Rect(up_position, image.get_size()),
+                )
+                canvas.blit(
+                    image,
+                    (
+                        up_position[0] + down_shift,
+                        up_position[1] + down_shift,
+                    ),
+                )
+                description = self.HOVER_TEXT.get(button.symbol_id)
+                if description:
+                    # Source rollOver handlers assign the root text field and
+                    # have no rollOut handler, so the last description stays.
+                    self.hover_description = description
+                break
+        if self.hover_description:
+            self._draw_text(canvas, self.hover_description, 19, 353, 12, (255, 255, 255))
 
     def _draw_player_select(
         self,
@@ -876,32 +927,27 @@ class MainMenu:
             x = (index * 94 + 6) * EXPORT_SCALE
             y = 70 * EXPORT_SCALE
             canvas.blit(self.fighter_box, (x, y))
-            pose = self.fighter_poses[name]
-            max_w = 78 * EXPORT_SCALE
-            max_h = 96 * EXPORT_SCALE
-            scale = min(max_w / pose.get_width(), max_h / pose.get_height(), 1.0)
-            pose_draw = pygame.transform.smoothscale(
-                pose,
-                (max(1, round(pose.get_width() * scale)), max(1, round(pose.get_height() * scale))),
-            )
+            pose, pose_offset, scale_x = self.fighter_poses[name]
+            pose_draw = pose
+            if scale_x != 1.0:
+                pose_draw = pygame.transform.smoothscale(
+                    pose,
+                    (max(1, round(pose.get_width() * scale_x)), pose.get_height()),
+                )
             canvas.blit(
                 pose_draw,
                 (
-                    round(x + 43.5 * EXPORT_SCALE - pose_draw.get_width() / 2),
-                    round(y + 55 * EXPORT_SCALE - pose_draw.get_height() / 2),
+                    round(x + pose_offset.x * EXPORT_SCALE),
+                    round(y + pose_offset.y * EXPORT_SCALE),
                 ),
             )
         for index in range(self.num_players):
             x, y = self._player_box_origin(index)
             enabled = self.player_enabled[index]
             color_index = min(index, 3)
-            if enabled and self.computer_players[index]:
-                box = self.player_boxes[color_index].copy()
-                number_patch = pygame.transform.smoothscale(
-                    box.subsurface(pygame.Rect(220, 64, 12, 104)).copy(),
-                    (82, 104),
-                )
-                box.blit(number_patch, (345, 64))
+            computer = self.computer_players[index]
+            if enabled and computer:
+                box = self._computer_player_box(color_index)
                 canvas.blit(box, (round(x * EXPORT_SCALE), round(y * EXPORT_SCALE)))
                 self._draw_center_text(
                     canvas,
@@ -924,9 +970,10 @@ class MainMenu:
                 if not enabled:
                     self._draw_text(canvas, "N/A", x + 7, y + 25, 28, (255, 255, 255))
 
-            label = "CP" if self.computer_players[index] else f"P{index + 1}"
+            label = "CP" if computer else f"P{index + 1}"
             if enabled:
-                self._draw_text(canvas, label, x + 6, y + 19, 28, (255, 255, 255))
+                self._draw_player_box_label(canvas, label, x, y)
+
             selected = self.selected_fighters[index]
             if selected and enabled:
                 self._draw_selection_preview(canvas, selected, index, x, y)
@@ -943,6 +990,7 @@ class MainMenu:
                         round((coin_y + coin_offset.y) * EXPORT_SCALE),
                     ),
                 )
+                label = "CP" if computer else f"P{index + 1}"
                 self._draw_center_text(canvas, label, coin_x, coin_y, 11, (255, 255, 255))
 
         self._draw_limit_picker(canvas)
@@ -951,6 +999,32 @@ class MainMenu:
             go = self.buttons[1019].copy()
             go.fill((255, 220, 80, 255), special_flags=pygame.BLEND_RGBA_MULT)
             canvas.blit(go, (round(534.85 * EXPORT_SCALE - go.get_width() / 2), round(36.8 * EXPORT_SCALE - go.get_height() / 2)))
+
+    def _computer_player_box(self, color_index: int) -> pygame.Surface:
+        """Return a CP box with the source P-number field cleared.
+
+        The exported desktop sprites are 4x, while the compact phone bundle
+        uses 1x sprites.  These coordinates are expressed in the SWF's logical
+        pixels so both packages crop inside the actual surface.
+        """
+
+        box = self.player_boxes[color_index].copy()
+        source = pygame.Rect(
+            round(55.0 * EXPORT_SCALE),
+            round(16.0 * EXPORT_SCALE),
+            max(1, round(3.0 * EXPORT_SCALE)),
+            max(1, round(26.0 * EXPORT_SCALE)),
+        )
+        target_size = (
+            max(1, round(20.5 * EXPORT_SCALE)),
+            max(1, round(26.0 * EXPORT_SCALE)),
+        )
+        number_patch = pygame.transform.smoothscale(box.subsurface(source).copy(), target_size)
+        box.blit(
+            number_patch,
+            (round(86.25 * EXPORT_SCALE), round(16.0 * EXPORT_SCALE)),
+        )
+        return box
 
     def _draw_selection_preview(
         self,
@@ -999,6 +1073,39 @@ class MainMenu:
             (
                 round((box_x + anchor_x + offset.x * display_scale) * EXPORT_SCALE),
                 round((box_y + anchor_y + offset.y * display_scale) * EXPORT_SCALE),
+            ),
+        )
+
+    def _draw_player_box_label(
+        self,
+        canvas: pygame.Surface,
+        label: str,
+        box_x: float,
+        box_y: float,
+    ) -> None:
+        """Rasterize selection field 796 with the source Flash registration."""
+
+        # Field 796 declares 28 px Futura Md BT. FFDec's generated TTF is
+        # nearly twice as heavy under SDL_ttf as Ruffle's embedded outline;
+        # native Futura Medium at 24 px matches the visible source weight.
+        image = self._font(24).render(label, True, (255, 255, 255))
+        glyph = image.get_bounding_rect(min_alpha=1)
+        image = image.subsurface(glyph).copy()
+        image = pygame.transform.smoothscale(
+            image,
+            (
+                max(1, round(image.get_width() * 1.2)),
+                image.get_height(),
+            ),
+        )
+        canvas.blit(
+            image,
+            (
+                round((box_x + 9) * EXPORT_SCALE),
+                round(
+                    (box_y + 16 + {"P3": -1, "P4": -2}.get(label, 0))
+                    * EXPORT_SCALE
+                ),
             ),
         )
 
@@ -1057,9 +1164,18 @@ class MainMenu:
         self._draw_text(canvas, "Controls Setup", 13, 42, 43, (255, 255, 255), bold=True)
         self._draw_text(
             canvas,
-            "Got a Joystick or Game Controller? Click",
+            "Got a Joystick or Game Controller? Click here to download JoyToKey and play",
             13,
             82,
+            13,
+            (255, 255, 255),
+            bold=True,
+        )
+        self._draw_text(
+            canvas,
+            "this game with your controller!",
+            13,
+            102,
             13,
             (255, 255, 255),
             bold=True,
@@ -1228,7 +1344,10 @@ class MainMenu:
             return cached
         if self.futura_font_path.is_file():
             cached = pygame.font.Font(str(self.futura_font_path), key[0])
-            cached.set_bold(key[1])
+            # The SWF's <b> runs still reference the same embedded Futura
+            # outline. SDL_ttf's synthetic emboldening expands those glyphs
+            # by several pixels and is visibly heavier than Flash, so retain
+            # the source outline instead of fabricating a second weight.
         else:
             cached = pygame.font.SysFont("futura", key[0], bold=key[1])
         self._font_cache[key] = cached

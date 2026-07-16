@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
@@ -25,9 +26,12 @@ class MenuParityTests(unittest.TestCase):
     def tearDownClass(cls) -> None:
         pygame.quit()
 
-    def test_dynamic_text_uses_the_exported_futura_md_bt_font(self) -> None:
-        expected = pygame.font.Font(str(ROOT / "assets/fonts/2_Futura Md BT.ttf"), 80)
-        expected.set_bold(True)
+    def test_dynamic_text_uses_the_closest_available_futura_medium_raster(self) -> None:
+        native = Path("/System/Library/Fonts/Supplemental/Futura.ttc")
+        expected = pygame.font.Font(
+            str(native if native.is_file() else ROOT / "assets/fonts/2_Futura Md BT.ttf"),
+            80,
+        )
         actual = self.menu._font(20, True)
         self.assertEqual(actual.size("The Fight for Glorton"), expected.size("The Fight for Glorton"))
 
@@ -188,6 +192,55 @@ class MenuParityTests(unittest.TestCase):
                 self.assertEqual(len(run["frames"]), 18)
                 self.assertEqual(run["playback"], {"loop_from": 4, "loop_at": 18})
 
+    def test_selection_pose_layout_covers_known_crop_registration_corrections(self) -> None:
+        self.assertEqual(
+            self.menu.FIGHTER_POSE_LAYOUT["CoffeePlayer"],
+            (10.190180955, 8.273095735, 1.0),
+        )
+        self.assertEqual(
+            self.menu.FIGHTER_POSE_LAYOUT["AuberginePlayer"],
+            (3.8, 1.25, 0.99),
+        )
+
+    def test_player_box_futura_field_matches_original_visible_glyph_bounds(self) -> None:
+        self.menu._start_player_select("vsmode", 4, 4)
+        canvas = self.menu._base_canvas()
+        self.menu._draw_player_select(canvas, None)
+        frame = pygame.transform.smoothscale(canvas, (600, 400))
+        expected = (
+            (34, 204, 57, 221),
+            (172, 204, 198, 221),
+            (309, 204, 336, 220),
+            (447, 204, 475, 220),
+        )
+        for region, bounds in zip(((25, 158), (163, 295), (300, 433), (438, 570)), expected):
+            points = [
+                (x, y)
+                for y in range(190, 240)
+                for x in range(*region)
+                if min(frame.get_at((x, y))[:3]) > 220
+            ]
+            actual = (
+                min(x for x, _y in points),
+                min(y for _x, y in points),
+                max(x for x, _y in points),
+                max(y for _x, y in points),
+            )
+            self.assertEqual(actual, bounds)
+            self.assertLessEqual(len(points), 180)
+
+    def test_computer_player_box_crop_supports_compact_mobile_assets(self) -> None:
+        compact_box = pygame.Surface((136, 199), pygame.SRCALPHA)
+        compact_box.fill((32, 64, 96, 255))
+        original_boxes = self.menu.player_boxes
+        try:
+            self.menu.player_boxes = [compact_box] * 5
+            with patch("src.menu.EXPORT_SCALE", 1):
+                result = self.menu._computer_player_box(0)
+        finally:
+            self.menu.player_boxes = original_boxes
+        self.assertEqual(result.get_size(), (136, 199))
+
     def test_time_buttons_follow_source_piecewise_steps(self) -> None:
         self.menu.limit_mode = "time"
         cases = (
@@ -229,6 +282,11 @@ class MenuParityTests(unittest.TestCase):
         self.menu.player_levels[0] = 20
         self.menu.player_levels[0] = min(20, self.menu.player_levels[0] + 1)
         self.assertEqual(self.menu.player_levels[0], 20)
+        self.assertEqual(self.menu._maximum_ai_level(), 20)
+        with patch.dict(os.environ, {"GLORTON_AI21_MODEL": "/tmp/model.zip"}):
+            self.assertEqual(self.menu._maximum_ai_level(), 21)
+        with patch.dict(os.environ, {"GLORTON_AI22_MODEL": "/tmp/model.zip"}):
+            self.assertEqual(self.menu._maximum_ai_level(), 22)
 
     def test_duplicate_fighters_receive_next_unused_source_color(self) -> None:
         self.menu._start_player_select("vsmode", 4, 4)
@@ -299,6 +357,17 @@ class MenuParityTests(unittest.TestCase):
         for key, name in expected.items():
             with self.subTest(key=key):
                 self.assertEqual(self.menu._key_name(key), name)
+
+    def test_hover_description_persists_without_a_source_rollout_handler(self) -> None:
+        self.menu.scene = "main"
+        canvas = self.menu._base_canvas()
+        self.menu._draw_button_hover(canvas, (302, 243))
+        self.assertEqual(
+            self.menu.hover_description,
+            "Play with your friends or ennemies! Up to 4 people can play simultaneously!",
+        )
+        self.menu._draw_button_hover(self.menu._base_canvas(), (5, 5))
+        self.assertIn("Play with your friends", self.menu.hover_description)
 
 
 if __name__ == "__main__":

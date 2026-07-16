@@ -1,0 +1,30 @@
+{
+  "v5_navigation": {
+    "episodes": 20,
+    "successes": 20,
+    "success_rate": 1.0,
+    "required_success_rate": 0.9,
+    "passed": true
+  },
+  "v5_air_chase": {
+    "episodes": 20,
+    "successes": 20,
+    "success_rate": 1.0,
+    "required_success_rate": 0.35,
+    "passed": true
+  },
+  "v5_escape": {
+    "episodes": 20,
+    "successes": 20,
+    "success_rate": 1.0,
+    "required_success_rate": 0.65,
+    "passed": true
+  },
+  "v5_combo": {
+    "episodes": 20,
+    "successes": 15,
+    "success_rate": 0.75,
+    "required_success_rate": 0.3,
+    "passed": true
+  }
+}

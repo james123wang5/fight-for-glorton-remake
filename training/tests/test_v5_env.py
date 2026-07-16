@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 from gymnasium.utils.env_checker import check_env
@@ -258,6 +259,27 @@ class V5PurposeEnvironmentTests(unittest.TestCase):
             self.assertGreater(self.env.agent.pos.y, self.env.runtime.stage.bounds.top)
             self.assertGreater(self.env.opponent.pos.y, self.env.runtime.stage.bounds.top)
         self.assertGreater(len(starts), 1)
+
+    def test_scripted_probe_accepts_rare_legal_purposes_without_crashing_rollout(self) -> None:
+        self.env.reset(
+            seed=81,
+            options={"curriculum": "duel", "agent_slot": 0, "items_enabled": False},
+        )
+        rocket_only = np.zeros(PURPOSE_COUNT, dtype=bool)
+        rocket_only[Purpose.ROCKET] = True
+        with patch.object(self.env, "_action_mask_for_slot", return_value=rocket_only):
+            self.assertEqual(
+                self.env._scripted_opponent_purpose("active"),
+                int(Purpose.ROCKET),
+            )
+
+        land_only = np.zeros(PURPOSE_COUNT, dtype=bool)
+        land_only[Purpose.LAND] = True
+        with patch.object(self.env, "_action_mask_for_slot", return_value=land_only):
+            self.assertEqual(
+                self.env._scripted_opponent_purpose("melee"),
+                int(Purpose.LAND),
+            )
 
     def test_deployment_uses_v5_observation_and_purpose_mask(self) -> None:
         self.env.reset(

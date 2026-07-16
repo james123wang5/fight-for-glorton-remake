@@ -314,12 +314,26 @@ class V5PeachEnv(V4PeachEnv):
             Purpose.ANTI_AIR,
             Purpose.MELEE,
             Purpose.AIMED_SHOT if style == "active" else Purpose.CHASE,
+            Purpose.ROCKET if style == "active" else Purpose.CHASE,
+            Purpose.EVADE,
+            Purpose.SHIELD,
+            Purpose.LAND,
             Purpose.CHASE,
             Purpose.CONTINUE,
         )
         if target.state == "thrown" and mask[Purpose.AIR_CHASE]:
             return int(Purpose.AIR_CHASE)
-        return int(next(item for item in priorities if mask[int(item)]))
+        for purpose in priorities:
+            if mask[int(purpose)]:
+                return int(purpose)
+        # purpose_action_mask promises at least one legal action, but keep the
+        # scripted probes total over future mask additions as well.  A probe
+        # must never abort a many-hour rollout merely because its preferred
+        # style has no legal choice in one unusual physics state.
+        legal = np.flatnonzero(mask)
+        if legal.size:
+            return int(legal[0])
+        raise RuntimeError("v5 opponent action mask unexpectedly has no legal purpose")
 
     def _script_action(self) -> int:
         if self.curriculum in {"v5_navigation", "v5_air_chase"}:

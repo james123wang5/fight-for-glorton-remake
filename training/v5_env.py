@@ -294,7 +294,13 @@ class V5PeachEnv(V4PeachEnv):
             Purpose.CHASE,
             Purpose.CONTINUE,
         )
-        return int(next(item for item in preferred if mask[int(item)]))
+        for purpose in preferred:
+            if mask[int(purpose)]:
+                return int(purpose)
+        legal = np.flatnonzero(mask)
+        if legal.size:
+            return int(legal[0])
+        raise RuntimeError("v5 tactical conversion mask unexpectedly has no legal purpose")
 
     def _scripted_opponent_purpose(self, style: str) -> int:
         slot = self.opponent_slot

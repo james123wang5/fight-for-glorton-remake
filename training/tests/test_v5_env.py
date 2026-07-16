@@ -265,21 +265,25 @@ class V5PurposeEnvironmentTests(unittest.TestCase):
             seed=81,
             options={"curriculum": "duel", "agent_slot": 0, "items_enabled": False},
         )
-        rocket_only = np.zeros(PURPOSE_COUNT, dtype=bool)
-        rocket_only[Purpose.ROCKET] = True
-        with patch.object(self.env, "_action_mask_for_slot", return_value=rocket_only):
-            self.assertEqual(
-                self.env._scripted_opponent_purpose("active"),
-                int(Purpose.ROCKET),
-            )
-
-        land_only = np.zeros(PURPOSE_COUNT, dtype=bool)
-        land_only[Purpose.LAND] = True
-        with patch.object(self.env, "_action_mask_for_slot", return_value=land_only):
-            self.assertEqual(
-                self.env._scripted_opponent_purpose("melee"),
-                int(Purpose.LAND),
-            )
+        for legal_purpose in Purpose:
+            only_one = np.zeros(PURPOSE_COUNT, dtype=bool)
+            only_one[legal_purpose] = True
+            with self.subTest(purpose=legal_purpose.name), patch.object(
+                self.env,
+                "_action_mask_for_slot",
+                return_value=only_one,
+            ):
+                self.assertEqual(
+                    self.env._scripted_opponent_purpose("active"),
+                    int(legal_purpose),
+                )
+                self.assertEqual(
+                    self.env._purpose_from_tactical(
+                        np.asarray([0, 0], dtype=np.int64),
+                        slot=self.env.opponent_slot,
+                    ),
+                    int(legal_purpose),
+                )
 
     def test_deployment_uses_v5_observation_and_purpose_mask(self) -> None:
         self.env.reset(

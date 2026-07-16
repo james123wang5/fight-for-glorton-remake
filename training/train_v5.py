@@ -764,7 +764,10 @@ def main() -> None:
     _write_json(directory / "training_config.json", metadata)
     print(f"\nv5候选21级: {candidate_paths[21]}\nv5候选22级: {candidate_paths[22]}")
     levels = champions.get("levels", {})
-    if all(levels.get(str(level), {}).get("qualified") for level in (21, 22)):
+    if args.freeze_champions:
+        print("本轮冠军已冻结。人工验收新候选: "
+              ".venv-train/bin/python -m training.play_v5 --prefer-candidate")
+    elif all(levels.get(str(level), {}).get("qualified") for level in (21, 22)):
         print("两个级别都有合格冠军。试玩: .venv-train/bin/python -m training.play_v5")
     else:
         quoted = shlex.quote(str(directory))

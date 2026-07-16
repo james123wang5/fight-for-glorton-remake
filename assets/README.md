@@ -1,7 +1,16 @@
 # 本地生成资源目录
 
 此目录中的运行资源由项目工具从使用者本地合法取得的
-`fight-for-glorton.swf` 和 FFDec 导出物生成，不随公开 Git 仓库分发。
+`fight-for-glorton.swf` 和 FFDec 导出物生成，不直接写入 Git 历史。
+
+只需要跨电脑运行时，可以安装 Release 中经过依赖裁剪的 1× 资源包：
+
+```bash
+python tools/install_runtime_assets.py
+```
+
+它包含游戏实际引用的动画帧、菜单、地图、字体、声音和清单，不包含约 1.4 GB 的
+高分辨率导出和中间文件。原素材权利仍归相应权利人所有；公开再分发前请确认授权。
 
 在项目根目录依次运行：
 

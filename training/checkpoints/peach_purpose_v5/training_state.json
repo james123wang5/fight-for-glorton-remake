@@ -1,8 +1,12 @@
 {
   "observation_version": "glorton-peach-purpose-v5",
-  "foundation_timesteps": 1276935,
+  "foundation_timesteps": 1428040,
   "skills_complete": true,
-  "mixed_foundation_complete": false,
-  "approved_as_levels": [21, 22],
-  "active_phase": null
+  "mixed_foundation_complete": true,
+  "approved_as_levels": [
+    21,
+    22
+  ],
+  "active_phase": null,
+  "last_completed_phase": "mixed_foundation"
 }

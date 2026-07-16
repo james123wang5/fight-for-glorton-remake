@@ -7,7 +7,13 @@ import numpy as np
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_MODEL = ROOT / "training" / "checkpoints" / "peach_purpose_v5" / "foundation_model.zip"
+DEFAULT_MODEL = (
+    ROOT
+    / "training"
+    / "checkpoints"
+    / "peach_purpose_v5"
+    / "champion_level22_model.zip"
+)
 DEFAULT_OUTPUT = ROOT / "assets" / "ai" / "v5_purpose_policy.npz"
 
 

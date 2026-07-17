@@ -34,6 +34,14 @@ FIGHTER_LABELS = {
     "DefaultPlayer": "Ball",
     "AuberginePlayer": "Aubergine",
 }
+FIGHTER_SYMBOLS = {
+    "SBLPlayer": "110_SBLPlayer_Pose",
+    "PeachPlayer": "422_PeachPlayer_Pose",
+    "TrashPlayer": "326_TrashPlayer_Pose",
+    "CoffeePlayer": "230_CoffeePlayer_Pose",
+    "DefaultPlayer": "560_DefaultPlayer_Pose",
+    "AuberginePlayer": "10_AuberginePlayer_Pose",
+}
 COLORS = ((196, 32, 40), (55, 98, 190), (78, 154, 39), (225, 145, 29))
 
 
@@ -70,6 +78,7 @@ class OnlineGameClient:
         self.prediction_offset = pygame.Vector2()
         self.last_local_controls = {field: False for field in INPUT_FIELDS}
         self.finished_message = ""
+        self.lobby_fighter_images: dict[str, pygame.Surface] = {}
         self.running = True
 
     async def send(self, message: Mapping[str, Any]) -> None:
@@ -325,7 +334,88 @@ class OnlineGameClient:
         slots = self.room_state.get("slots", [])
         return dict(slots[index]) if 0 <= index < len(slots) else {}
 
+    @staticmethod
+    def _gateway_button_rects(size: tuple[int, int]) -> tuple[pygame.Rect, pygame.Rect]:
+        width, _ = size
+        return (
+            pygame.Rect(width // 2 - 190, 190, 380, 54),
+            pygame.Rect(width // 2 - 190, 260, 380, 54),
+        )
+
+    @staticmethod
+    def _lobby_panel_rects(size: tuple[int, int]) -> list[pygame.Rect]:
+        width, height = size
+        gap = 8
+        margin = 18
+        panel_w = (width - margin * 2 - gap * 3) // 4
+        panel_h = min(385, max(285, height - 330))
+        return [
+            pygame.Rect(margin + index * (panel_w + gap), 118, panel_w, panel_h)
+            for index in range(4)
+        ]
+
+    @staticmethod
+    def _ready_button_rect(size: tuple[int, int]) -> pygame.Rect:
+        width, height = size
+        return pygame.Rect(width // 2 - 115, height - 82, 230, 42)
+
+    @staticmethod
+    def _settings_button_rects(size: tuple[int, int]) -> dict[str, pygame.Rect]:
+        width, _ = size
+        return {
+            "stage_prev": pygame.Rect(width - 475, 59, 32, 34),
+            "stage_next": pygame.Rect(width - 237, 59, 32, 34),
+            "stock_minus": pygame.Rect(width - 191, 59, 32, 34),
+            "stock_plus": pygame.Rect(width - 99, 59, 32, 34),
+            "items": pygame.Rect(width - 60, 59, 48, 34),
+        }
+
+    @staticmethod
+    def _fighter_button_rects(panel: pygame.Rect) -> tuple[pygame.Rect, pygame.Rect]:
+        y = panel.y + min(235, panel.height - 128)
+        return (
+            pygame.Rect(panel.x + 10, y, 35, 35),
+            pygame.Rect(panel.right - 45, y, 35, 35),
+        )
+
+    @staticmethod
+    def _color_button_rects(panel: pygame.Rect) -> list[pygame.Rect]:
+        total = 4 * 29 + 3 * 8
+        x = panel.centerx - total // 2
+        y = panel.bottom - 82
+        return [pygame.Rect(x + index * 37, y, 29, 25) for index in range(4)]
+
+    @staticmethod
+    def _ai_control_rects(panel: pygame.Rect) -> dict[str, pygame.Rect]:
+        return {
+            "toggle": pygame.Rect(panel.x + 10, panel.bottom - 42, 66, 28),
+            "minus": pygame.Rect(panel.centerx - 63, panel.bottom - 42, 32, 28),
+            "plus": pygame.Rect(panel.centerx + 31, panel.bottom - 42, 32, 28),
+        }
+
+    def _editable_slot(self, index: int) -> bool:
+        is_host = self.local_slot == int(self.room_state.get("host_slot", -1))
+        return index == self.local_slot or (is_host and index >= 2)
+
+    async def _cycle_fighter(self, target: int, direction: int) -> None:
+        slot = self._slot(target)
+        fighter = str(slot.get("fighter", "PeachPlayer"))
+        current = FIGHTERS.index(fighter) if fighter in FIGHTERS else 0
+        await self._lobby_patch(target, fighter=FIGHTERS[(current + direction) % len(FIGHTERS)])
+
     async def _handle_gateway_event(self, event: pygame.event.Event) -> None:
+        if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+            surface = pygame.display.get_surface()
+            if surface is None:
+                return
+            create_rect, join_rect = self._gateway_button_rects(surface.get_size())
+            if create_rect.collidepoint(event.pos):
+                self._start_connect("create")
+            elif join_rect.collidepoint(event.pos):
+                self.join_code = ""
+                self.mode = "join_code"
+                self.status = "Type the 6-character room code, then Enter"
+            return
         if event.type != pygame.KEYDOWN:
             return
         if event.key == pygame.K_c:
@@ -350,7 +440,12 @@ class OnlineGameClient:
                 self.join_code += text
 
     async def _handle_lobby_event(self, event: pygame.event.Event) -> None:
-        if event.type != pygame.KEYDOWN or self.local_slot < 0:
+        if self.local_slot < 0:
+            return
+        if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+            await self._handle_lobby_click(event.pos)
+            return
+        if event.type != pygame.KEYDOWN:
             return
         own = self._slot(self.local_slot)
         is_host = self.local_slot == int(self.room_state.get("host_slot", -1))
@@ -360,11 +455,9 @@ class OnlineGameClient:
             await self._lobby_patch(self.local_slot, ready=not bool(own.get("ready")))
             return
         if event.key == pygame.K_LEFT:
-            current = FIGHTERS.index(str(target_slot.get("fighter", "PeachPlayer")))
-            await self._lobby_patch(target, fighter=FIGHTERS[(current - 1) % len(FIGHTERS)])
+            await self._cycle_fighter(target, -1)
         elif event.key == pygame.K_RIGHT:
-            current = FIGHTERS.index(str(target_slot.get("fighter", "PeachPlayer")))
-            await self._lobby_patch(target, fighter=FIGHTERS[(current + 1) % len(FIGHTERS)])
+            await self._cycle_fighter(target, 1)
         elif event.key == pygame.K_UP:
             await self._lobby_patch(target, color=(int(target_slot.get("color", 0)) + 1) % 4)
         elif event.key == pygame.K_DOWN:
@@ -399,6 +492,71 @@ class OnlineGameClient:
                 slot = self._slot(self.selected_target)
                 await self._lobby_patch(self.selected_target, level=min(22, int(slot.get("level", 20)) + 1))
 
+    async def _handle_lobby_click(self, position: tuple[int, int]) -> None:
+        surface = pygame.display.get_surface()
+        if surface is None:
+            return
+        size = surface.get_size()
+        own = self._slot(self.local_slot)
+        if self._ready_button_rect(size).collidepoint(position):
+            await self._lobby_patch(self.local_slot, ready=not bool(own.get("ready")))
+            return
+
+        is_host = self.local_slot == int(self.room_state.get("host_slot", -1))
+        if is_host:
+            settings = self.room_state.get("settings", {})
+            buttons = self._settings_button_rects(size)
+            if buttons["stage_prev"].collidepoint(position):
+                stage = str(settings.get("stage", "Mogadishu"))
+                index = STAGES.index(stage) if stage in STAGES else 0
+                await self._settings_patch(stage=STAGES[(index - 1) % len(STAGES)])
+                return
+            if buttons["stage_next"].collidepoint(position):
+                stage = str(settings.get("stage", "Mogadishu"))
+                index = STAGES.index(stage) if stage in STAGES else 0
+                await self._settings_patch(stage=STAGES[(index + 1) % len(STAGES)])
+                return
+            if buttons["stock_minus"].collidepoint(position):
+                await self._settings_patch(stock=max(1, int(settings.get("stock", 5)) - 1))
+                return
+            if buttons["stock_plus"].collidepoint(position):
+                await self._settings_patch(stock=min(20, int(settings.get("stock", 5)) + 1))
+                return
+            if buttons["items"].collidepoint(position):
+                await self._settings_patch(items=not bool(settings.get("items", True)))
+                return
+
+        for index, panel in enumerate(self._lobby_panel_rects(size)):
+            if not panel.collidepoint(position) or not self._editable_slot(index):
+                continue
+            self.selected_target = index
+            slot = self._slot(index)
+            if slot.get("kind") == "ai":
+                controls = self._ai_control_rects(panel)
+                if controls["toggle"].collidepoint(position):
+                    await self._lobby_patch(index, enabled=not bool(slot.get("enabled")))
+                    return
+                if controls["minus"].collidepoint(position):
+                    await self._lobby_patch(index, level=max(1, int(slot.get("level", 20)) - 1))
+                    return
+                if controls["plus"].collidepoint(position):
+                    await self._lobby_patch(index, level=min(22, int(slot.get("level", 20)) + 1))
+                    return
+                if not slot.get("enabled"):
+                    return
+            left, right = self._fighter_button_rects(panel)
+            if left.collidepoint(position):
+                await self._cycle_fighter(index, -1)
+                return
+            if right.collidepoint(position):
+                await self._cycle_fighter(index, 1)
+                return
+            for color_index, color_rect in enumerate(self._color_button_rects(panel)):
+                if color_rect.collidepoint(position):
+                    await self._lobby_patch(index, color=color_index)
+                    return
+            return
+
     async def _handle_event(self, event: pygame.event.Event) -> None:
         if event.type == pygame.QUIT:
             self.running = False
@@ -428,10 +586,56 @@ class OnlineGameClient:
 
     @staticmethod
     def _font(size: int, bold: bool = False) -> pygame.font.Font:
-        path = ROOT / "assets" / "fonts" / "2_Futura Md BT.ttf"
-        font = pygame.font.Font(str(path) if path.is_file() else None, size)
+        font = pygame.font.Font(None, round(size * 1.25))
         font.set_bold(bold)
         return font
+
+    @staticmethod
+    def _brand_font(size: int) -> pygame.font.Font:
+        path = ROOT / "assets" / "fonts" / "2_Futura Md BT.ttf"
+        font = pygame.font.Font(str(path) if path.is_file() else None, size)
+        font.set_bold(True)
+        return font
+
+    def _load_lobby_fighter_images(self) -> None:
+        self.lobby_fighter_images.clear()
+        sprite_root = ROOT / "assets" / "menu" / "sprites"
+        for fighter, symbol in FIGHTER_SYMBOLS.items():
+            path = sprite_root / f"DefineSprite_{symbol}" / "1.png"
+            if not path.is_file():
+                continue
+            try:
+                image = pygame.image.load(str(path)).convert_alpha()
+                # The exported menu pose contains its old "Character Lock" caption.
+                # The synchronized lobby draws its own current fighter name instead.
+                image = image.subsurface((0, 0, image.get_width(), round(image.get_height() * 0.84))).copy()
+                bounds = image.get_bounding_rect(min_alpha=1)
+                if bounds.width and bounds.height:
+                    image = image.subsurface(bounds).copy()
+                scale = min(150 / max(1, image.get_width()), 145 / max(1, image.get_height()))
+                size = (
+                    max(1, round(image.get_width() * scale)),
+                    max(1, round(image.get_height() * scale)),
+                )
+                self.lobby_fighter_images[fighter] = pygame.transform.smoothscale(image, size)
+            except pygame.error:
+                continue
+
+    def _draw_button(
+        self,
+        screen: pygame.Surface,
+        rect: pygame.Rect,
+        label: str,
+        *,
+        active: bool = True,
+        accent: tuple[int, int, int] = (70, 112, 170),
+        size: int = 16,
+    ) -> None:
+        fill = accent if active else (55, 59, 66)
+        pygame.draw.rect(screen, fill, rect, border_radius=7)
+        pygame.draw.rect(screen, (225, 230, 238) if active else (105, 110, 120), rect, 1, 7)
+        image = self._font(size, True).render(label, True, (250, 250, 250) if active else (145, 150, 158))
+        screen.blit(image, image.get_rect(center=rect.center))
 
     def _draw_center(self, screen: pygame.Surface, text: str, y: int, size: int, color=(245, 245, 245)) -> None:
         image = self._font(size, True).render(text, True, color)
@@ -439,61 +643,134 @@ class OnlineGameClient:
 
     def _draw_gateway(self, screen: pygame.Surface) -> None:
         screen.fill((14, 17, 22))
-        self._draw_center(screen, "GLORTON ONLINE", 95, 52)
+        heading = self._brand_font(52).render("GLORTON ONLINE", True, (245, 245, 245))
+        screen.blit(heading, heading.get_rect(center=(screen.get_width() // 2, 125)))
         if self.mode == "join_code":
             self._draw_center(screen, "ROOM CODE", 205, 24, (170, 180, 195))
             self._draw_center(screen, self.join_code.ljust(6, "_"), 245, 48, (255, 210, 70))
         else:
-            self._draw_center(screen, "C   CREATE ROOM", 210, 28, (110, 220, 150))
-            self._draw_center(screen, "J   JOIN ROOM", 255, 28, (100, 165, 255))
+            create_rect, join_rect = self._gateway_button_rects(screen.get_size())
+            self._draw_button(screen, create_rect, "C   CREATE ROOM", accent=(38, 132, 84), size=23)
+            self._draw_button(screen, join_rect, "J   JOIN ROOM", accent=(42, 91, 155), size=23)
         self._draw_center(screen, self.status, screen.get_height() - 52, 17, (180, 190, 205))
 
     def _draw_lobby(self, screen: pygame.Surface) -> None:
         screen.fill((18, 21, 27))
-        title = self._font(34, True).render(f"ROOM  {self.room}", True, (255, 215, 72))
+        title = self._brand_font(34).render(f"ROOM  {self.room}", True, (255, 215, 72))
         screen.blit(title, (24, 18))
         settings = self.room_state.get("settings", {})
-        details = self._font(18).render(
-            f"Stage: {settings.get('stage')}   Stock: {settings.get('stock')}   Items: {'ON' if settings.get('items') else 'OFF'}",
-            True,
-            (210, 218, 228),
+        is_host = self.local_slot == int(self.room_state.get("host_slot", -1))
+        setting_buttons = self._settings_button_rects(screen.get_size())
+        self._draw_button(screen, setting_buttons["stage_prev"], "<", active=is_host)
+        self._draw_button(screen, setting_buttons["stage_next"], ">", active=is_host)
+        stage_area = pygame.Rect(
+            setting_buttons["stage_prev"].right + 5,
+            59,
+            setting_buttons["stage_next"].left - setting_buttons["stage_prev"].right - 10,
+            34,
         )
-        screen.blit(details, (24, 66))
-        width = screen.get_width()
-        panel_w = (width - 60) // 4
-        for index in range(4):
+        stage_image = self._font(15, True).render(str(settings.get("stage", "Mogadishu")), True, (220, 225, 234))
+        screen.blit(stage_image, stage_image.get_rect(center=stage_area.center))
+        self._draw_button(screen, setting_buttons["stock_minus"], "-", active=is_host)
+        self._draw_button(screen, setting_buttons["stock_plus"], "+", active=is_host)
+        stock_area = pygame.Rect(setting_buttons["stock_minus"].right, 59, 60, 34)
+        stock_image = self._font(15, True).render(f"x{settings.get('stock', 5)}", True, (220, 225, 234))
+        screen.blit(stock_image, stock_image.get_rect(center=stock_area.center))
+        self._draw_button(
+            screen,
+            setting_buttons["items"],
+            "ITEM" if settings.get("items") else "NO",
+            active=is_host,
+            accent=(127, 82, 36) if settings.get("items") else (70, 72, 78),
+            size=12,
+        )
+        host_note = "HOST CONTROLS" if is_host else "HOST IS CHOOSING MATCH RULES"
+        note = self._font(13, True).render(host_note, True, (145, 154, 170))
+        screen.blit(note, (24, 78))
+
+        panels = self._lobby_panel_rects(screen.get_size())
+        for index, rect in enumerate(panels):
             slot = self._slot(index)
-            rect = pygame.Rect(18 + index * (panel_w + 8), 115, panel_w, 250)
             enabled = bool(slot.get("enabled"))
             color_index = int(slot.get("color", index)) % 4
-            base = COLORS[color_index] if enabled else (65, 68, 75)
+            raw_color = COLORS[color_index]
+            base = tuple(max(38, channel // 3) for channel in raw_color) if enabled else (48, 51, 58)
             pygame.draw.rect(screen, base, rect, border_radius=14)
-            pygame.draw.rect(screen, (245, 245, 245), rect, 3 if index == self.local_slot else 1, 14)
+            border = raw_color if enabled else (105, 108, 116)
+            pygame.draw.rect(screen, border, rect, 4 if index == self.local_slot else 2, 14)
             if index == self.selected_target:
                 pygame.draw.rect(screen, (255, 220, 70), rect.inflate(-8, -8), 2, 10)
             name = str(slot.get("name", f"P{index + 1}"))
             kind = "HUMAN" if slot.get("kind") == "human" else "AI"
-            fighter = FIGHTER_LABELS.get(str(slot.get("fighter")), "OFF") if enabled else "OFF"
-            lines = [f"P{index + 1}  {kind}", name, fighter]
-            if slot.get("kind") == "ai" and enabled:
-                lines.append(f"LEVEL {slot.get('level', 20)}")
-            if slot.get("kind") == "human":
-                lines.append("READY" if slot.get("ready") else "NOT READY")
-                lines.append("ONLINE" if slot.get("connected") else "DISCONNECTED")
-            for row, line in enumerate(lines):
-                image = self._font(20 if row < 3 else 17, row in {0, 2}).render(line, True, (255, 255, 255))
-                screen.blit(image, (rect.centerx - image.get_width() // 2, rect.y + 22 + row * 38))
+            header = self._font(20, True).render(f"P{index + 1}  {kind}", True, (255, 255, 255))
+            screen.blit(header, header.get_rect(center=(rect.centerx, rect.y + 25)))
+            name_image = self._font(14).render(name, True, (195, 205, 218))
+            screen.blit(name_image, name_image.get_rect(center=(rect.centerx, rect.y + 49)))
+
+            fighter_key = str(slot.get("fighter", "PeachPlayer"))
+            portrait = self.lobby_fighter_images.get(fighter_key) if enabled else None
+            portrait_center_y = rect.y + min(142, rect.height // 2 - 10)
+            if portrait is not None:
+                screen.blit(portrait, portrait.get_rect(center=(rect.centerx, portrait_center_y)))
+            elif enabled:
+                fallback = self._font(44, True).render("?", True, (225, 230, 238))
+                screen.blit(fallback, fallback.get_rect(center=(rect.centerx, portrait_center_y)))
+
+            fighter_y = rect.y + min(252, rect.height - 111)
+            fighter = FIGHTER_LABELS.get(fighter_key, "OFF") if enabled else "OFF"
+            fighter_image = self._font(18, True).render(fighter, True, (255, 255, 255))
+            screen.blit(fighter_image, fighter_image.get_rect(center=(rect.centerx, fighter_y + 17)))
+            left, right = self._fighter_button_rects(rect)
+            editable = self._editable_slot(index)
+            self._draw_button(screen, left, "<", active=editable and enabled)
+            self._draw_button(screen, right, ">", active=editable and enabled)
+
+            for swatch_index, swatch in enumerate(self._color_button_rects(rect)):
+                pygame.draw.rect(screen, COLORS[swatch_index], swatch, border_radius=5)
+                outline = (255, 255, 255) if swatch_index == color_index else (35, 37, 42)
+                pygame.draw.rect(screen, outline, swatch, 3 if swatch_index == color_index else 1, 5)
+
+            if slot.get("kind") == "ai":
+                controls = self._ai_control_rects(rect)
+                self._draw_button(
+                    screen,
+                    controls["toggle"],
+                    "ON" if enabled else "ADD",
+                    active=is_host,
+                    accent=(42, 128, 81) if enabled else (78, 86, 99),
+                    size=13,
+                )
+                self._draw_button(screen, controls["minus"], "-", active=is_host and enabled)
+                self._draw_button(screen, controls["plus"], "+", active=is_host and enabled)
+                level = self._font(14, True).render(f"LV {slot.get('level', 20)}", True, (245, 245, 245))
+                screen.blit(level, level.get_rect(center=(rect.centerx, controls["minus"].centery)))
+            else:
+                ready_text = "READY" if slot.get("ready") else "NOT READY"
+                if not slot.get("connected"):
+                    ready_text = "DISCONNECTED"
+                ready_color = (110, 235, 145) if slot.get("ready") else (230, 190, 100)
+                ready_image = self._font(15, True).render(ready_text, True, ready_color)
+                screen.blit(ready_image, ready_image.get_rect(center=(rect.centerx, rect.bottom - 28)))
         instructions = [
-            "Your fighter: LEFT/RIGHT    Color: UP/DOWN    ENTER: READY",
+            "Click your card to choose fighter and color. Both players see every change immediately.",
         ]
-        if self.local_slot == int(self.room_state.get("host_slot", -1)):
+        if is_host:
             instructions += [
-                "Host: [ ] stage   - + stock   I items   F3/F4 add CPU",
-                "1 select yourself; 3/4 select CPU; arrows edit; ,/. AI level",
+                "Host can add P3/P4 AI, choose any of 6 fighters, and set AI level 1-22.",
             ]
+        instruction_y = panels[0].bottom + 10
         for row, line in enumerate(instructions):
             image = self._font(16).render(line, True, (190, 200, 214))
-            screen.blit(image, (22, 385 + row * 25))
+            screen.blit(image, (22, instruction_y + row * 24))
+        ready_rect = self._ready_button_rect(screen.get_size())
+        own = self._slot(self.local_slot)
+        self._draw_button(
+            screen,
+            ready_rect,
+            "CANCEL READY" if own.get("ready") else "READY",
+            accent=(151, 83, 44) if own.get("ready") else (39, 139, 81),
+            size=18,
+        )
         status = self._font(16).render(self.status, True, (120, 210, 255))
         screen.blit(status, (22, screen.get_height() - 28))
 
@@ -535,6 +812,7 @@ class OnlineGameClient:
         pygame.init()
         pygame.display.set_caption("The Fight for Glorton - Online")
         screen = pygame.display.set_mode(recommended_window_size(WINDOW_SIZE), pygame.RESIZABLE)
+        self._load_lobby_fighter_images()
         clock = pygame.time.Clock()
         debug_font = pygame.font.SysFont("menlo", 14)
         while self.running:

@@ -13,7 +13,7 @@ os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 
 import pygame
 
-from src.runtime import RuntimeApp, Stage
+from src.runtime import Bullet, RuntimeApp, SpecialProjectile, Stage, StageItem
 from src.simulation import BattleSimulation, INPUT_FIELDS
 
 
@@ -132,6 +132,60 @@ class BattleSimulationTests(unittest.TestCase):
             self.assertIsNone(fast.step_fast(controls))
 
         self.assertEqual(fast.state_digest(), regular.state_digest())
+
+    def test_network_snapshot_restores_projectiles_items_and_explosions(self) -> None:
+        runtime = RuntimeApp(random_seed=731)
+        runtime.match_state = "playing"
+        sender = runtime.fighters[0]
+        sender.intro_visible = True
+        bullet = Bullet(
+            pygame.Vector2(300, 180),
+            20,
+            pygame.image.load(str(Path(__file__).resolve().parents[1] / sender.projectile_image_path)),
+            sender,
+            pygame.Vector2(sender.projectile_offset),
+            source_scale=sender.projectile_render_scale,
+        )
+        bullet.prev_pos = pygame.Vector2(280, 180)
+        runtime.bullets.append(bullet)
+        kind = "EnergyBall"
+        special = SpecialProjectile(
+            kind,
+            pygame.Vector2(330, 170),
+            4,
+            0,
+            0,
+            sender._special_projectile_frames(kind),
+            sender,
+            dict(sender.projectile_data.get(kind, {})),
+        )
+        special.prev_pos = pygame.Vector2(326, 170)
+        runtime.special_projectiles.append(special)
+        item_kind = "Grenade"
+        item = StageItem(
+            item_kind,
+            pygame.Vector2(360, 190),
+            runtime.item_frames[item_kind],
+            frame_labels=runtime.item_frame_labels[item_kind],
+            source_scale=runtime.item_source_scales[item_kind],
+        )
+        item.prev_pos = pygame.Vector2(item.pos)
+        runtime.items.append(item)
+        runtime._start_explosion(pygame.Vector2(400, 200), sender, 3)
+        snapshot = runtime.simulation.snapshot()
+        expected = runtime.simulation.digest(snapshot)
+
+        runtime.bullets.clear()
+        runtime.special_projectiles.clear()
+        runtime.items.clear()
+        runtime.explosions.clear()
+        restored = runtime.simulation.restore_snapshot(snapshot)
+
+        self.assertEqual(runtime.simulation.digest(restored), expected)
+        self.assertEqual(len(runtime.bullets), 1)
+        self.assertEqual(len(runtime.special_projectiles), 1)
+        self.assertEqual(len(runtime.items), 1)
+        self.assertEqual(len(runtime.explosions), 1)
 
     def test_human_vs_ai_capture_saves_complete_training_material_without_live_updates(self) -> None:
         with tempfile.TemporaryDirectory() as directory, patch.dict(

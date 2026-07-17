@@ -26,6 +26,11 @@ mobile/site-host/
 # Generated original-game assets and local comparison output
 assets/*
 !assets/README.md
+!assets/ai/
+assets/ai/*
+!assets/ai/v5_purpose_policy.npz
+!assets/ai/online/
+!assets/ai/online/**
 artifacts/
 
 # Local reinforcement-learning output (models can grow very large)

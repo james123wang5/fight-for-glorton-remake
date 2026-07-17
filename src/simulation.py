@@ -593,25 +593,19 @@ class BattleSimulation:
         return recording
 
     def restore_snapshot(self, snapshot: Mapping[str, Any]) -> dict[str, Any]:
-        """Restore a JSON snapshot suitable for replay or state correction.
-
-        Dynamic entities are deliberately required to be empty at the restore
-        boundary for now. A recording may create them after its first input;
-        this keeps the initial-state contract deterministic without silently
-        constructing incomplete projectile or item objects.
-        """
+        """Restore a JSON snapshot suitable for replay or network correction."""
 
         if snapshot.get("schema") != self.SCHEMA:
             raise ValueError("Unsupported Glorton snapshot schema")
-        dynamic_fields = ("bullets", "rockets", "special_projectiles", "items", "explosions")
-        nonempty = [field for field in dynamic_fields if snapshot.get(field)]
-        if nonempty:
-            raise ValueError(
-                "Snapshot restore currently requires an entity-free boundary; "
-                f"found {', '.join(nonempty)}"
-            )
-
-        from .runtime import Stage
+        from .runtime import (
+            Bullet,
+            ExplosionEffect,
+            RocketProjectile,
+            SpecialProjectile,
+            Stage,
+            StageItem,
+        )
+        import pygame
 
         runtime = self.runtime
         self.seed = int(snapshot.get("seed", self.seed))
@@ -654,6 +648,122 @@ class BattleSimulation:
             )
             fighter.throw_victim = (
                 runtime.fighters[int(throw_victim)] if throw_victim is not None else None
+            )
+
+        def sender_at(state: Mapping[str, Any]) -> Any:
+            sender = state.get("sender")
+            return runtime.fighters[int(sender)] if sender is not None else None
+
+        for state in snapshot.get("bullets", []):
+            sender = sender_at(state)
+            if sender is None:
+                continue
+            projectile = Bullet(
+                pos=pygame.Vector2(state["pos"]),
+                xinc=state.get("xinc", 0),
+                image=pygame.image.load(str(Path(__file__).resolve().parents[1] / sender.projectile_image_path)),
+                sender=sender,
+                offset=pygame.Vector2(sender.projectile_offset),
+                source_scale=float(state.get("source_scale", sender.projectile_render_scale)),
+                age=int(state.get("age", 0)),
+                life=int(state.get("life", 3000)),
+                alive=bool(state.get("alive", True)),
+            )
+            projectile.prev_pos = pygame.Vector2(state.get("prev_pos", state["pos"]))
+            runtime.bullets.append(projectile)
+
+        for state in snapshot.get("rockets", []):
+            sender = sender_at(state)
+            if sender is None:
+                continue
+            projectile = RocketProjectile(
+                pos=pygame.Vector2(state["pos"]),
+                xinc=state.get("xinc", 0),
+                yinc=state.get("yinc", 0),
+                rotation=state.get("rotation", 0),
+                image=pygame.image.load(str(Path(__file__).resolve().parents[1] / sender.rocket_image_path)),
+                sender=sender,
+                offset=pygame.Vector2(sender.rocket_offset),
+                source_scale=float(state.get("source_scale", sender.rocket_render_scale)),
+                mirrored=bool(state.get("mirrored", False)),
+                age=int(state.get("age", 0)),
+                life=int(state.get("life", 3000)),
+                alive=bool(state.get("alive", True)),
+            )
+            projectile.prev_pos = pygame.Vector2(state.get("prev_pos", state["pos"]))
+            runtime.rockets.append(projectile)
+
+        for state in snapshot.get("special_projectiles", []):
+            sender = sender_at(state)
+            if sender is None:
+                continue
+            kind = str(state.get("kind", ""))
+            projectile = SpecialProjectile(
+                kind=kind,
+                pos=pygame.Vector2(state["pos"]),
+                xinc=state.get("xinc", 0),
+                yinc=state.get("yinc", 0),
+                rotation=state.get("rotation", 0),
+                frames=sender._special_projectile_frames(kind),
+                sender=sender,
+                config=dict(sender.projectile_data.get(kind, {})),
+                variant=int(state.get("variant", 1)),
+                display_scale=float(state.get("display_scale", 1.0)),
+                facing=int(state.get("facing", 1)),
+                age=int(state.get("age", 0)),
+                alive=bool(state.get("alive", True)),
+            )
+            projectile.prev_pos = pygame.Vector2(state.get("prev_pos", state["pos"]))
+            runtime.special_projectiles.append(projectile)
+
+        for state in snapshot.get("items", []):
+            kind = str(state.get("kind", ""))
+            platform = platforms.get(state.get("active_platform"))
+            offset = state.get("active_offset")
+            item = StageItem(
+                kind=kind,
+                pos=pygame.Vector2(state["pos"]),
+                frames=runtime.item_frames.get(kind, []),
+                frame_labels=runtime.item_frame_labels.get(kind, {}),
+                source_scale=float(state.get("source_scale", runtime.item_source_scales.get(kind, 1.0))),
+                life_ms=int(state.get("life_ms", 20000)),
+                age_ms=int(state.get("age_ms", 0)),
+                state=int(state.get("state", 1)),
+                alive=bool(state.get("alive", True)),
+                sender=sender_at(state),
+                xinc=float(state.get("xinc", 0)),
+                yinc=float(state.get("yinc", 0)),
+                rotation=float(state.get("rotation", 0)),
+                active_ms=int(state.get("active_ms", 0)),
+                active_platform=platform,
+                active_offset=pygame.Vector2(offset) if offset is not None else None,
+                influenced=set(int(value) for value in state.get("influenced", [])),
+            )
+            item.prev_pos = pygame.Vector2(state.get("prev_pos", state["pos"]))
+            runtime.items.append(item)
+
+        for state in snapshot.get("explosions", []):
+            runtime.explosions.append(
+                ExplosionEffect(
+                    pos=pygame.Vector2(state["pos"]),
+                    size=int(state.get("size", 4)),
+                    sender=sender_at(state),
+                    frames=runtime.boom_star_frames,
+                    wave_frames=runtime.boom_wave_frames,
+                    matter_frames=runtime.boom_matter_frames,
+                    matter_offsets=[pygame.Vector2(value) for value in state.get("matter_offsets", [])],
+                    age_ms=int(state.get("age_ms", 0)),
+                    influenced=set(int(value) for value in state.get("influenced", [])),
+                )
+            )
+
+        for fighter, state in zip(runtime.fighters, fighters):
+            current_item_index = state.get("current_item_index")
+            fighter.current_item_obj = (
+                runtime.items[int(current_item_index)]
+                if current_item_index is not None
+                and 0 <= int(current_item_index) < len(runtime.items)
+                else None
             )
 
         for field in (

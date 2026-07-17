@@ -42,6 +42,10 @@
 推荐顺序是 Default、Trash、Coffee、SBL、Aubergine。先从动作结构接近、回场容易验证的
 角色开始，最后处理弹道或体型差异最大的角色。
 
+阶段 B 的五角色并发训练入口和中断续训命令见
+[`ROSTER_AI_PHASE_B_CN.md`](ROSTER_AI_PHASE_B_CN.md)。当前实现仍固定 Mogadishu，候选只写入
+独立的 `roster_v6` 目录，不会自动覆盖正式模型。
+
 ### 阶段 C：逐地图课程
 
 冻结角色冠军，依次加入 Rooftop、B52、Space。训练局按“单图专项 → 两图混合 → 四图混合”

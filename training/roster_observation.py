@@ -5,7 +5,7 @@ from typing import Any
 import numpy as np
 
 from .roster_contract import encode_roster_context
-from .v5_env import V5_OBSERVATION_SIZE, encode_v5_observation
+from .v5_runtime_observation import V5_OBSERVATION_SIZE, encode_v5_runtime_observation
 from .v5_options import PurposefulOptionController
 
 
@@ -28,7 +28,7 @@ def encode_roster_observation(
 ) -> np.ndarray:
     """Keep the frozen 294-value v5 prefix and append roster/map context."""
 
-    legacy = encode_v5_observation(
+    legacy = encode_v5_runtime_observation(
         runtime,
         fighter,
         opponent,
@@ -36,7 +36,6 @@ def encode_roster_observation(
         episode_ticks=episode_ticks,
         max_ticks=max_ticks,
         spawns_swapped=spawns_swapped,
-        curriculum=curriculum,
         wall_stall_steps=wall_stall_steps,
     )
     context = encode_roster_context(runtime, fighter, opponent)

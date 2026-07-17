@@ -7,7 +7,8 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from training.v5_options import PURPOSE_COUNT, PurposefulOptionController, purpose_action_mask
+from training.v5_options import PURPOSE_COUNT, Purpose, PurposefulOptionController, purpose_action_mask
+from training.v5_runtime_helpers import is_offstage
 from training.v5_runtime_observation import (
     V5_FRAME_SKIP,
     V5_OBSERVATION_SIZE,
@@ -27,13 +28,14 @@ class WebV5Policy:
             self.b2 = weights["b2"].astype(np.float32, copy=False)
             self.wa = weights["wa"].astype(np.float32, copy=False)
             self.ba = weights["ba"].astype(np.float32, copy=False)
-        expected = ((256, 294), (256,), (256, 256), (256,), (14, 256), (14,))
+        expected = (256, (256,), (256, 256), (256,), (14, 256), (14,))
         actual = tuple(value.shape for value in (self.w1, self.b1, self.w2, self.b2, self.wa, self.ba))
-        if actual != expected:
+        if self.w1.ndim != 2 or (actual[0][0], *actual[1:]) != expected:
             raise RuntimeError(f"网页v5策略权重不兼容: {actual!r}")
+        self.observation_size = int(self.w1.shape[1])
 
     def predict(self, observation: np.ndarray, action_mask: Sequence[bool]) -> int:
-        vector = np.asarray(observation, dtype=np.float32).reshape(V5_OBSERVATION_SIZE)
+        vector = np.asarray(observation, dtype=np.float32).reshape(self.observation_size)
         hidden = np.tanh(self.w1 @ vector + self.b1)
         hidden = np.tanh(self.w2 @ hidden + self.b2)
         logits = self.wa @ hidden + self.ba
@@ -90,6 +92,9 @@ class WebV5AIController:
         self.observations: deque[np.ndarray] = deque()
         self.active = False
         self.was_dead = False
+        self.mutual_idle_decisions = 0
+        self.stalemate_breaks = 0
+        self._last_activity_sample: tuple[float, ...] | None = None
 
     def _pick_opponent(self, fighters: Sequence[Any]) -> Any | None:
         candidates = [fighter for fighter in fighters if fighter is not self.player and not fighter.dead]
@@ -135,6 +140,57 @@ class WebV5AIController:
         )
         self.active = True
         self.was_dead = False
+        self.mutual_idle_decisions = 0
+        self._last_activity_sample = self._activity_sample()
+
+    def _activity_sample(self) -> tuple[float, ...] | None:
+        if self.victim is None:
+            return None
+        return (
+            float(self.player.pos.x),
+            float(self.player.pos.y),
+            float(self.player.damage_amnt),
+            float(self.victim.pos.x),
+            float(self.victim.pos.y),
+            float(self.victim.damage_amnt),
+        )
+
+    def _mutual_stalemate(self) -> bool:
+        sample = self._activity_sample()
+        previous = self._last_activity_sample
+        self._last_activity_sample = sample
+        if sample is None or previous is None or self.victim is None:
+            self.mutual_idle_decisions = 0
+            return False
+        valid = bool(
+            self.runtime.match_state == "playing"
+            and not self.player.dead
+            and not self.victim.dead
+            and self.player.state not in {"spawn", "thrown", "ko", "dead"}
+            and self.victim.state not in {"spawn", "thrown", "ko", "dead"}
+            and not self.player.current_attack
+            and not self.victim.current_attack
+            and not is_offstage(self.runtime, self.player)
+            and not is_offstage(self.runtime, self.victim)
+        )
+        moved = math.hypot(sample[0] - previous[0], sample[1] - previous[1])
+        moved += math.hypot(sample[3] - previous[3], sample[4] - previous[4])
+        damage_changed = bool(sample[2] != previous[2] or sample[5] != previous[5])
+        self.mutual_idle_decisions = self.mutual_idle_decisions + 1 if valid and moved < 1.0 and not damage_changed else 0
+        try:
+            slot = self.runtime.fighters.index(self.player)
+        except ValueError:
+            slot = 0
+        return self.mutual_idle_decisions >= 10 + min(3, slot) * 6
+
+    def _action_mask(self) -> np.ndarray:
+        return purpose_action_mask(
+            self.runtime,
+            self.player,
+            self.victim,
+            self.option,
+            curriculum="duel",
+        )
 
     def _decide(self, fighters: Sequence[Any]) -> None:
         self.victim = self._pick_opponent(fighters)
@@ -142,13 +198,23 @@ class WebV5AIController:
             self.control_sequence = ({}, {}, {}, {})
             return
         self.observations.append(self._observation())
-        mask = purpose_action_mask(
-            self.runtime,
-            self.player,
-            self.victim,
-            self.option,
-            curriculum="duel",
-        )
+        mask = self._action_mask()
+        if self._mutual_stalemate():
+            if mask[Purpose.MELEE]:
+                action = int(Purpose.MELEE)
+                self.control_sequence = self.option.begin_decision(
+                    action, fighter=self.player, opponent=self.victim, action_mask=mask
+                )
+            elif mask[Purpose.AIMED_SHOT]:
+                action = int(Purpose.AIMED_SHOT)
+                self.control_sequence = self.option.begin_decision(
+                    action, fighter=self.player, opponent=self.victim, action_mask=mask
+                )
+            else:
+                self.control_sequence = self.option.begin_stalemate_break(self.player, self.victim)
+            self.mutual_idle_decisions = 0
+            self.stalemate_breaks += 1
+            return
         action = self.policy.predict(self.observations[0], mask)
         self.control_sequence = self.option.begin_decision(
             action,

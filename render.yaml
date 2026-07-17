@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: glorton-online-server
+    runtime: docker
+    plan: free
+    dockerfilePath: ./online/Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.7
+      - key: GLORTON_ASSET_SCALE
+        value: "1"
+      - key: SDL_VIDEODRIVER
+        value: dummy
+      - key: SDL_AUDIODRIVER
+        value: dummy

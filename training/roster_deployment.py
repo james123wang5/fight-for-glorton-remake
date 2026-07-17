@@ -7,15 +7,20 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from .v5_env import V5_FRAME_SKIP, V5_OBSERVATION_SIZE, encode_v5_observation
-from .v5_options import PURPOSE_COUNT, Purpose, PurposefulOptionController, purpose_action_mask
+from .roster_observation import (
+    ROSTER_OBSERVATION_SIZE,
+    encode_roster_observation,
+)
+from .roster_options import roster_purpose_action_mask
+from .v5_env import V5_FRAME_SKIP
+from .v5_options import PURPOSE_COUNT, Purpose, PurposefulOptionController
 from .v5_runtime_helpers import is_offstage
 
 
 _MODEL_CACHE: dict[Path, Any] = {}
 
 
-def _load_v5_model(path: Path) -> Any:
+def _load_roster_model(path: Path) -> Any:
     resolved = path.expanduser().resolve()
     cached = _MODEL_CACHE.get(resolved)
     if cached is not None:
@@ -24,17 +29,18 @@ def _load_v5_model(path: Path) -> Any:
         from sb3_contrib import MaskablePPO
     except ImportError as exc:
         raise RuntimeError(
-            "v5 AI需要训练环境。请用 .venv-train/bin/python -m training.play_v5 启动。"
+            "全角色AI需要训练环境，请用 .venv-train/bin/python -m "
+            "training.play_roster_battle 启动。"
         ) from exc
     if not resolved.is_file():
-        raise RuntimeError(f"找不到v5 AI模型: {resolved}")
+        raise RuntimeError(f"找不到全角色AI模型: {resolved}")
     model = MaskablePPO.load(str(resolved), device="cpu")
     _MODEL_CACHE[resolved] = model
     return model
 
 
-class V5TrainedAIController:
-    """Live-game v5 controller using the same plan executor as training."""
+class RosterTrainedAIController:
+    """Use one role's 480-value v6 policy in the ordinary rendered battle."""
 
     force_victim = False
     uses_simulation_controls = True
@@ -55,19 +61,20 @@ class V5TrainedAIController:
         self.stage = stage
         self.level = int(level)
         self.model_path = Path(model_path).expanduser().resolve()
-        self.model = model if model is not None else _load_v5_model(self.model_path)
+        self.model = model if model is not None else _load_roster_model(self.model_path)
         expected_shape = tuple(
             getattr(getattr(self.model, "observation_space", None), "shape", ()) or ()
         )
-        if expected_shape != (V5_OBSERVATION_SIZE,):
+        if expected_shape != (ROSTER_OBSERVATION_SIZE,):
             raise RuntimeError(
-                f"{self.level}级v5 AI模型观察维度不兼容: "
-                f"需要 ({V5_OBSERVATION_SIZE},), 实际 {expected_shape}"
+                f"{self.player.fighter_name} {self.level}级模型观察维度不兼容: "
+                f"需要 ({ROSTER_OBSERVATION_SIZE},)，实际 {expected_shape}"
             )
         action_count = int(getattr(getattr(self.model, "action_space", None), "n", -1))
         if action_count not in {-1, PURPOSE_COUNT}:
             raise RuntimeError(
-                f"{self.level}级v5 AI动作空间不兼容: 需要 Discrete({PURPOSE_COUNT})"
+                f"{self.player.fighter_name} {self.level}级模型动作空间不兼容: "
+                f"需要 Discrete({PURPOSE_COUNT})"
             )
         self.reaction_delay_decisions = max(0, int(reaction_delay_decisions))
         self.option = PurposefulOptionController(runtime)
@@ -84,7 +91,11 @@ class V5TrainedAIController:
         self._last_activity_sample: tuple[float, ...] | None = None
 
     def _pick_opponent(self, fighters: Sequence[Any]) -> Any | None:
-        candidates = [fighter for fighter in fighters if fighter is not self.player and not fighter.dead]
+        candidates = [
+            fighter
+            for fighter in fighters
+            if fighter is not self.player and not fighter.dead
+        ]
         if not candidates:
             candidates = [fighter for fighter in fighters if fighter is not self.player]
         if not candidates:
@@ -99,8 +110,8 @@ class V5TrainedAIController:
 
     def _observation(self) -> np.ndarray:
         if self.victim is None:
-            return np.zeros(V5_OBSERVATION_SIZE, dtype=np.float32)
-        return encode_v5_observation(
+            return np.zeros(ROSTER_OBSERVATION_SIZE, dtype=np.float32)
+        return encode_roster_observation(
             self.runtime,
             self.player,
             self.victim,
@@ -116,9 +127,9 @@ class V5TrainedAIController:
         self.victim = self._pick_opponent(fighters)
         spawn_p1 = self.stage.spawn_point("SpawnP1")
         spawn_p2 = self.stage.spawn_point("SpawnP2")
-        self.spawns_swapped = self.player.pos.distance_to(spawn_p2) < self.player.pos.distance_to(
-            spawn_p1
-        )
+        self.spawns_swapped = self.player.pos.distance_to(
+            spawn_p2
+        ) < self.player.pos.distance_to(spawn_p1)
         self.option.reset()
         self.control_sequence = ({}, {}, {}, {})
         self.action_phase = 0
@@ -146,6 +157,8 @@ class V5TrainedAIController:
         )
 
     def _mutual_stalemate(self) -> bool:
+        """Detect a real playing-state duel stall, not a normal short pause."""
+
         sample = self._activity_sample()
         previous = self._last_activity_sample
         self._last_activity_sample = sample
@@ -170,6 +183,8 @@ class V5TrainedAIController:
             self.mutual_idle_decisions += 1
         else:
             self.mutual_idle_decisions = 0
+        # Decisions run at 10 Hz. P1 breaks symmetry after 1.0 s; later slots
+        # wait a little longer so both fighters do not mirror the same jump.
         try:
             slot = self.runtime.fighters.index(self.player)
         except ValueError:
@@ -182,7 +197,7 @@ class V5TrainedAIController:
             self.control_sequence = ({}, {}, {}, {})
             return
         self.observations.append(self._observation())
-        mask = purpose_action_mask(
+        mask = roster_purpose_action_mask(
             self.runtime,
             self.player,
             self.victim,
@@ -190,16 +205,22 @@ class V5TrainedAIController:
             curriculum="duel",
         )
         if self._mutual_stalemate():
+            # Attack immediately when already in a genuine hit window.
+            # Otherwise execute one asymmetric approach+jump to cross the
+            # building geometry, even if a stale learned plan requested the
+            # same failed navigation intention again.
             if mask[Purpose.MELEE]:
+                forced = Purpose.MELEE
                 self.control_sequence = self.option.begin_decision(
-                    int(Purpose.MELEE),
+                    int(forced),
                     fighter=self.player,
                     opponent=self.victim,
                     action_mask=mask,
                 )
             elif mask[Purpose.AIMED_SHOT]:
+                forced = Purpose.AIMED_SHOT
                 self.control_sequence = self.option.begin_decision(
-                    int(Purpose.AIMED_SHOT),
+                    int(forced),
                     fighter=self.player,
                     opponent=self.victim,
                     action_mask=mask,
@@ -219,7 +240,10 @@ class V5TrainedAIController:
         )
         candidate = np.asarray(action, dtype=np.int64).reshape(-1)
         if candidate.shape != (1,):
-            raise RuntimeError(f"{self.level}级v5 AI模型返回了无效意图: {candidate!r}")
+            raise RuntimeError(
+                f"{self.player.fighter_name} {self.level}级模型返回无效意图: "
+                f"{candidate!r}"
+            )
         self.control_sequence = self.option.begin_decision(
             int(candidate[0]),
             fighter=self.player,

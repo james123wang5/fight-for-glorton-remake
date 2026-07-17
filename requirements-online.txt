@@ -1,0 +1,5 @@
+-r requirements.txt
+numpy>=2.0
+fastapi>=0.116,<1.0
+uvicorn[standard]>=0.35,<1.0
+websockets>=15,<17

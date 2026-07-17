@@ -304,6 +304,24 @@ class V5PurposeEnvironmentTests(unittest.TestCase):
         self.assertEqual(fake.observation.shape, (V5_OBSERVATION_SIZE,))
         self.assertEqual(fake.mask.shape, (PURPOSE_COUNT,))
 
+    def test_deployment_breaks_a_mutual_static_navigation_loop(self) -> None:
+        self.env.reset(
+            seed=17,
+            options={"curriculum": "duel", "agent_slot": 0, "items_enabled": False},
+        )
+        controller = V5TrainedAIController(
+            self.env.runtime,
+            self.env.agent,
+            self.env.runtime.stage,
+            "unused.zip",
+            level=22,
+            model=FakeV5Policy(),
+        )
+        for _tick in range(80):
+            controller.controls_for_tick(self.env.runtime.fighters)
+        self.assertGreaterEqual(controller.stalemate_breaks, 1)
+        self.assertGreaterEqual(controller.option.events.forced_replans, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -884,6 +884,42 @@ class PurposefulOptionController:
         self.events.plan_completions += 1
         self.plan_age = self.deadline + 1
 
+    def begin_stalemate_break(
+        self,
+        fighter: Any,
+        opponent: Any,
+    ) -> tuple[dict[str, bool], ...]:
+        """Force one purposeful approach+jump after deployment detects a duel stall.
+
+        This is deliberately outside the learned policy.  A failed navigation
+        plan can otherwise be selected again immediately, resetting its local
+        no-progress counter forever.  The rare watchdog reuses the normal
+        tactical input adapter, so it still emits legal source-style edges.
+        """
+
+        self.events.plan_failures += int(self.has_active_plan)
+        self.events.forced_replans += 1
+        self.adapter.movement_lock = 0
+        self.adapter.previous_combat = 0
+        self.last_route = self.navigator.route(fighter, opponent)
+        self._start_plan(Purpose.NAVIGATE, fighter, opponent)
+        self.last_route = self.navigator.route(fighter, opponent)
+        direction = int(self.last_route.direction)
+        if direction == 0:
+            direction = 1 if opponent.pos.x >= fighter.pos.x else -1
+        self.target_x = float(self.last_route.target_x)
+        self.target_y = float(self.last_route.target_y)
+        self.desired_direction = direction
+        combat = self._safe_upward_combat(fighter, 1) if fighter.on_ground else 0
+        controls = self._tactical_controls(
+            fighter,
+            opponent,
+            direction=direction,
+            combat=combat,
+        )
+        self.plan_age += 1
+        return controls
+
     def features(self, fighter: Any, opponent: Any) -> list[float]:
         bounds = self.runtime.stage.bounds
         one_hot = [float(self.intent == Purpose(index)) for index in range(PURPOSE_COUNT)]

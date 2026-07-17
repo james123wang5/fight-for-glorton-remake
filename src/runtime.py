@@ -3348,6 +3348,87 @@ class RuntimeApp:
     ) -> object:
         model22_path = os.environ.get("GLORTON_AI22_MODEL", "")
         model_path = os.environ.get("GLORTON_AI21_MODEL", "")
+        if (
+            os.environ.get("GLORTON_AI_LIGHT") == "1"
+            and level in {21, 22}
+            and not force_victim
+        ):
+            if self.stage.name != "Mogadishu":
+                raise RuntimeError(
+                    f"轻量{level}级AI目前只训练过 Mogadishu，当前是 {self.stage.name}。"
+                )
+            role = fighter.fighter_name.removesuffix("Player").lower()
+            policy_path = ROOT / "assets" / "ai" / "online" / role / f"level{level}.npz"
+            if not policy_path.is_file():
+                raise RuntimeError(f"缺少{fighter.fighter_name} {level}级轻量AI: {policy_path}")
+            if fighter.fighter_name == "PeachPlayer":
+                try:
+                    from .v5_web_deployment import WebV5AIController
+                except ImportError:
+                    from v5_web_deployment import WebV5AIController
+                return WebV5AIController(
+                    self,
+                    fighter,
+                    self.stage,
+                    policy_path,
+                    level=level,
+                )
+            try:
+                from .roster_web_deployment import RosterWebAIController
+            except ImportError:
+                from roster_web_deployment import RosterWebAIController
+            return RosterWebAIController(
+                self,
+                fighter,
+                self.stage,
+                policy_path,
+                level=level,
+            )
+        if (
+            os.environ.get("GLORTON_AI_ROSTER") == "1"
+            and level in {21, 22}
+            and fighter.fighter_name != "PeachPlayer"
+            and not force_victim
+        ):
+            trained_stage = os.environ.get("GLORTON_AI_ROSTER_STAGE", "Mogadishu")
+            if self.stage.name != trained_stage:
+                raise RuntimeError(
+                    f"全角色候选只训练过 {trained_stage}，当前选择了 {self.stage.name}。"
+                )
+            roster_root = Path(
+                os.environ.get(
+                    "GLORTON_AI_ROSTER_ROOT",
+                    str(ROOT / "training" / "checkpoints" / "roster_v6"),
+                )
+            ).expanduser()
+            run_id = os.environ.get("GLORTON_AI_ROSTER_RUN_ID", "roster_b1")
+            role = fighter.fighter_name.removesuffix("Player").lower()
+            roster_model_path = (
+                roster_root
+                / role
+                / self.stage.name.lower()
+                / run_id
+                / f"candidate_level{level}_model.zip"
+            ).resolve()
+            if not roster_model_path.is_file():
+                raise RuntimeError(
+                    f"{fighter.fighter_name} 没有可用的{level}级全角色候选: "
+                    f"{roster_model_path}"
+                )
+            try:
+                from training.roster_deployment import RosterTrainedAIController
+            except ImportError as exc:
+                raise RuntimeError(
+                    "全角色候选加载失败，请用 .venv-train/bin/python -m "
+                    "training.play_roster_battle 启动。"
+                ) from exc
+            return RosterTrainedAIController(
+                self,
+                fighter,
+                self.stage,
+                roster_model_path,
+                level=level,
+            )
         web_v5_path = ""
         if os.environ.get("GLORTON_AI_V5_WEB") == "1" and not force_victim:
             if level == 22 and model22_path:

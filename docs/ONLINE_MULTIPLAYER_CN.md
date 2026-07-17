@@ -37,6 +37,24 @@ cd '/Users/wenxinzheng/Desktop/一些无关紧要的项目/pythonpygame/glorton_
 
 第一个窗口点击 `CREATE ROOM`（或按 `C`）创建房间，第二个窗口点击 `JOIN ROOM`（或按 `J`）并输入房间码。
 
+## 免费临时公网联机（房主电脑保持开机）
+
+这是无需云服务器、无需 Cloudflare 账号或银行卡的兜底方案。它通过 [Cloudflare Quick Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/) 把本机联机服务器临时映射到公网；Cloudflare Tunnel [原生支持 WebSocket](https://developers.cloudflare.com/cloudflare-one/faq/cloudflare-tunnels-faq/)。
+
+房主在项目目录运行：
+
+```bash
+cd '/Users/wenxinzheng/Desktop/一些无关紧要的项目/pythonpygame/glorton_remake'
+.venv-train/bin/python -m online.tunnel
+```
+
+终端会显示一个 `wss://随机名称.trycloudflare.com/ws` 地址和完整客户端命令。房主与朋友分别运行该命令，然后正常创建/加入 6 位房间码。
+
+- 房主终端必须保持运行，Mac 也必须联网；脚本会阻止空闲自动睡眠，但 Mac 合盖通常仍会断开。
+- 按 `Ctrl+C` 会关闭隧道以及由脚本启动的本机服务器。
+- 临时地址每次运行都会变化，没有可用性保证；它适合两三位朋友临时游玩，不是正式长期服务。
+- 只通过加密的出站连接开放 HTTP/WebSocket，不需要路由器端口转发。
+
 ## 联机大厅操作
 
 - 鼠标：点击自己角色卡两侧箭头换角色，点击四色方块换颜色，点击底部 `READY` 准备。两名真人的选择会实时同步显示。
